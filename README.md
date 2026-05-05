@@ -21,7 +21,7 @@ Once you're in, here's what you should know:
 
 ### Don't do this
 
-- ❌ **Don't open the same job in two browser tabs and click Resume in both.** The tool will warn you with a yellow banner ("This job is being run from another browser tab" or "...from another browser or laptop") and pause generation in the second window. Wait for the first to finish, or use the "take over" link only if the other window is genuinely stuck/closed. Both same-browser AND cross-laptop cases are guarded — the latter via a database-side runner lease.
+- ✅ **Tab can be closed during generation.** The job runs on the server in a background loop — closing or refreshing the tab doesn't interrupt it. Reopen the page later to see results. No more "must keep tab open."
 - ❌ **Don't put random URLs in the "Base URL" field** in Settings → Providers. The provider URL has to point at the real provider — anything else leaks our API key to that destination.
 - ❌ **Don't share the basic-auth password** outside the team or paste it into Slack / email screenshots.
 
@@ -89,7 +89,7 @@ Basic auth is the *secondary* control — the VPN is primary. If someone can rea
 
 - **Plaintext keys at rest.** Anyone with shell access to the box (or a backup of `data.db`) sees raw keys. Encrypt-at-rest is on the audit backlog.
 - **Two-runner race is fully guarded.** Two layers: (a) localStorage heartbeat catches same-browser multi-tab cheaply; (b) DB-side runner lease (jobs.runner_id + runner_heartbeat_at, 120s TTL) catches cross-browser, cross-laptop, private-window cases. The first orchestrator to call `actionGenerateBatch` claims the lease atomically; subsequent runners see `status: "lease_lost"` and are blocked with a "take over" banner. The losing runner does NOT make an AI call — no double-spend.
-- **Tab-closed = generation pauses.** Clicking Resume picks up at `batchesDone`. This is intentional (works on any host without long-running server processes) but means you can't close your browser if you want a 200-anchor job to finish overnight.
+- **Server-side background generation.** Generation runs as an in-process async loop in the Next.js server process. Browser is a passive viewer that polls `actionGetJobStatus` every 2.5s. Closing/refreshing the tab does NOT interrupt generation. When the server process is restarted (deploy/reboot) any in-flight loops die — `status` stays `running` in DB but no progress is made. The UI detects this after 30s of no advance + no live loop and shows a "Generation may have stalled — click Resume" banner. Resume re-spawns the loop. **No auto-resume on server startup** by design (avoids restart-crash-restart loops).
 - **No per-user attribution.** All jobs look like they were created by "the team."
 
 ### Files

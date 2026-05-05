@@ -23,6 +23,31 @@
   --cat-keyword-fg: #93c5fd;
   --cat-url-bg: rgba(16, 185, 129, 0.18);
   --cat-url-fg: #6ee7b7;
+  /* Status chip colors (dark-mode defaults) — see STATUS_VISUALS in JobsList.tsx.
+     fg values are deliberately bright (200–300 Tailwind range) so text reads cleanly
+     against the dark surface and the colored bg tint. */
+  --status-idle-bg: rgba(148, 163, 184, 0.20);
+  --status-idle-fg: #e2e8f0;
+  --status-idle-border: rgba(148, 163, 184, 0.55);
+  --status-running-bg: rgba(96, 165, 250, 0.22);
+  --status-running-fg: #bfdbfe;
+  --status-running-border: rgba(96, 165, 250, 0.55);
+  --status-paused-bg: rgba(251, 191, 36, 0.22);
+  --status-paused-fg: #fde68a;
+  --status-paused-border: rgba(251, 191, 36, 0.55);
+  --status-succeeded-bg: rgba(74, 222, 128, 0.22);
+  --status-succeeded-fg: #bbf7d0;
+  --status-succeeded-border: rgba(74, 222, 128, 0.55);
+  /* Partial: warm fill (like paused) but a danger-tinted border to scream "needs attention" */
+  --status-partial-bg: rgba(251, 191, 36, 0.22);
+  --status-partial-fg: #fde68a;
+  --status-partial-border: rgba(248, 113, 113, 0.65);
+  --status-failed-bg: rgba(248, 113, 113, 0.22);
+  --status-failed-fg: #fecaca;
+  --status-failed-border: rgba(248, 113, 113, 0.55);
+  --status-cancelled-bg: rgba(148, 163, 184, 0.18);
+  --status-cancelled-fg: #cbd5e1;
+  --status-cancelled-border: rgba(148, 163, 184, 0.50);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -64,13 +89,42 @@ body {
     --cat-keyword-fg: #1e40af;
     --cat-url-bg: rgba(5, 150, 105, 0.13);
     --cat-url-fg: #065f46;
+    /* Status chip colors — light mode: dark text (Tailwind 800-900 range) on a tinted bg.
+       Aim for WCAG AA (≥4.5:1) contrast against the chip background. */
+    --status-idle-bg: rgba(75, 85, 99, 0.14);
+    --status-idle-fg: #1f2937;
+    --status-idle-border: rgba(75, 85, 99, 0.55);
+    --status-running-bg: rgba(37, 99, 235, 0.14);
+    --status-running-fg: #1e3a8a;
+    --status-running-border: rgba(37, 99, 235, 0.60);
+    --status-paused-bg: rgba(217, 119, 6, 0.20);
+    --status-paused-fg: #78350f;
+    --status-paused-border: rgba(217, 119, 6, 0.65);
+    --status-succeeded-bg: rgba(5, 150, 105, 0.16);
+    --status-succeeded-fg: #064e3b;
+    --status-succeeded-border: rgba(5, 150, 105, 0.60);
+    /* Partial: same warm fill as paused, danger-tinted border */
+    --status-partial-bg: rgba(217, 119, 6, 0.18);
+    --status-partial-fg: #78350f;
+    --status-partial-border: rgba(185, 28, 28, 0.70);
+    --status-failed-bg: rgba(220, 38, 38, 0.15);
+    --status-failed-fg: #7f1d1d;
+    --status-failed-border: rgba(220, 38, 38, 0.60);
+    --status-cancelled-bg: rgba(75, 85, 99, 0.12);
+    --status-cancelled-fg: #374151;
+    --status-cancelled-border: rgba(75, 85, 99, 0.50);
   }
 }
 
-* { border-color: var(--color-border); }
-
-input, textarea, select, button { font: inherit; color: inherit; }
-input::placeholder, textarea::placeholder { color: var(--color-text-faint); }
+/* Wrap project-wide resets in @layer base so they have LOWER cascade priority than
+   Tailwind utility classes — otherwise `button { color: inherit }` would override every
+   text-* / font-* utility applied to a <button>, and `* { border-color: ... }` would
+   override every border-* utility. */
+@layer base {
+  * { border-color: var(--color-border); }
+  input, textarea, select, button { font: inherit; }
+  input::placeholder, textarea::placeholder { color: var(--color-text-faint); }
+}
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: var(--color-bg); }

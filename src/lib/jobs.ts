@@ -47,8 +47,55 @@ function rowToAnchor(r: Record<string, unknown>): JobAnchor {
   };
 }
 
+/** Stuck-job grace period: longer than RUNNER_LEASE_TTL_MS (2 min) so transient hiccups
+ *  don't get flagged. After 5 min of zero heartbeat updates while status='running',
+ *  we conclude the runner died (server restart, killed process, network partition). */
+const STUCK_RUNNING_GRACE_MS = 5 * 60_000;
+
+/**
+ * Reclassify jobs whose status='running' but whose runner has clearly died.
+ * - Has anchors in DB → 'partial' (some progress was made before the crash)
+ * - Zero anchors      → 'failed'  (nothing produced)
+ *
+ * Idempotent and cheap: a single targeted UPDATE per branch. Called on every listJobs()
+ * so the user never sees ghost-running jobs after a server restart.
+ */
+async function reconcileStuckRunningJobs(): Promise<void> {
+  const c = await db();
+  const cutoff = Date.now() - STUCK_RUNNING_GRACE_MS;
+  // Stuck + has anchors → partial
+  await c.execute({
+    sql: `UPDATE jobs
+            SET status = 'partial',
+                last_error = COALESCE(last_error, 'Server interrupted generation'),
+                runner_id = NULL,
+                runner_heartbeat_at = NULL,
+                updated_at = ?
+          WHERE status = 'running'
+            AND (runner_heartbeat_at IS NULL OR runner_heartbeat_at < ?)
+            AND updated_at < ?
+            AND id IN (SELECT job_id FROM job_anchors GROUP BY job_id)`,
+    args: [Date.now(), cutoff, cutoff],
+  });
+  // Stuck + no anchors → failed
+  await c.execute({
+    sql: `UPDATE jobs
+            SET status = 'failed',
+                last_error = COALESCE(last_error, 'Server interrupted before any anchors were produced'),
+                runner_id = NULL,
+                runner_heartbeat_at = NULL,
+                updated_at = ?
+          WHERE status = 'running'
+            AND (runner_heartbeat_at IS NULL OR runner_heartbeat_at < ?)
+            AND updated_at < ?
+            AND id NOT IN (SELECT job_id FROM job_anchors GROUP BY job_id)`,
+    args: [Date.now(), cutoff, cutoff],
+  });
+}
+
 export async function listJobs(): Promise<Job[]> {
   const c = await db();
+  await reconcileStuckRunningJobs();
   const r = await c.execute("SELECT * FROM jobs ORDER BY updated_at DESC");
   return r.rows.map((row) => rowToJob(row as unknown as Record<string, unknown>));
 }
@@ -121,6 +168,15 @@ export async function updateJob(args: {
 export async function deleteJob(id: string): Promise<void> {
   const c = await db();
   await c.execute({ sql: "DELETE FROM jobs WHERE id = ?", args: [id] });
+}
+
+/** Bulk delete. Returns the number of rows actually removed. */
+export async function deleteJobs(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const c = await db();
+  const placeholders = ids.map(() => "?").join(",");
+  const r = await c.execute({ sql: `DELETE FROM jobs WHERE id IN (${placeholders})`, args: ids });
+  return Number(r.rowsAffected ?? 0);
 }
 
 export async function replaceJobAnchors(jobId: string, anchors: Array<Omit<JobAnchor, "id" | "jobId" | "manuallyEdited"> & { id?: string }>): Promise<void> {

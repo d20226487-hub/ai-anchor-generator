@@ -13,26 +13,23 @@ import {
   actionDeleteJob,
   actionEditAnchorFollow,
   actionEditAnchorText,
-  actionGenerateBatch,
-  actionGetRunnerLease,
+  actionGetJobStatus,
   actionPauseGeneration,
   actionQuickFixRatio,
   actionRebalanceBrand,
   actionRegenerate,
   actionRenameJob,
   actionStartGeneration,
-  actionTakeOverRunner,
 } from "@/lib/actions";
 import { rowsToCsv } from "@/lib/anchors/csv";
 import { brandKeyOf, brandLabelOf } from "@/lib/anchors/brands";
 import type { Brand, Job, JobAnchor, AnchorCategory, FollowStatus } from "@/lib/types";
-import { AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, Filter, Pause, Pencil, Play, RefreshCw, Search, Settings2, Trash2, Wand2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, Filter, Info, Pause, Pencil, Play, RefreshCw, Search, Settings2, Trash2, Wand2, X } from "lucide-react";
 import { useT } from "@/lib/i18n/I18nProvider";
-import { useJobTabLock } from "./useJobTabLock";
 
 const CATEGORIES: AnchorCategory[] = ["generic", "branded", "keyword", "url"];
 
-function sleep(ms: number) {
+function sleep(ms: number): Promise<void> {
   return new Promise<void>((res) => setTimeout(res, ms));
 }
 
@@ -135,126 +132,58 @@ export function JobView({ job }: { job: Job }) {
   const isFailed = status === "failed" || status === "partial";
   const isPaused = status === "paused";
 
-  // Two-tab guard: if another tab IN THIS BROWSER is actively running this job, suppress
-  // this tab's orchestrator. Cheap and instant. Caught by the localStorage heartbeat.
-  const tabLock = useJobTabLock(job.id, isRunning);
-  const blockedByOtherTab = tabLock.otherTabActive;
+  // Server-side background loop drives generation. The browser is a passive viewer that
+  // polls actionGetJobStatus every 2.5s while status==="running" to refresh progress.
+  // Closing/refreshing the tab does NOT stop generation — the loop keeps running on the
+  // server until completion, pause, or server restart.
+  //
+  // "Stuck" detection: if status is running but the lease heartbeat hasn't advanced in
+  // 30s, the server-side loop is likely dead (server restart). Show a Resume hint.
+  const [stuckHintShown, setStuckHintShown] = React.useState(false);
 
-  // Cross-host runner lease (audit High #7). The DB lease catches the case the localStorage
-  // guard cannot: another browser, another laptop, private window. Stored as state because
-  // we only learn about it when actionGenerateBatch returns status="lease_lost".
-  const runnerIdRef = React.useRef<string>("");
-  if (!runnerIdRef.current) {
-    runnerIdRef.current =
-      typeof crypto !== "undefined" && crypto.randomUUID
-        ? `runner_${crypto.randomUUID()}`
-        : `runner_${Math.random().toString(36).slice(2, 10)}`;
-  }
-  const [otherRunner, setOtherRunner] = React.useState<{ id: string | null; ageMs: number | null } | null>(null);
-  const blockedByOtherHost = otherRunner !== null;
-
-  // Client-orchestrated batch loop. While status==running, run the next batch, await it,
-  // pause briefly to respect rate limits, then continue. Stops on cancel/failure/completion.
-  const cancelledRef = React.useRef(false);
-  const orchestratingRef = React.useRef(false);
   React.useEffect(() => {
-    if (status !== "running") return;
-    if (orchestratingRef.current) return;
-    if (blockedByOtherTab) return;  // same-browser other tab is running
-    if (blockedByOtherHost) return; // some other browser/laptop holds the DB lease
-    orchestratingRef.current = true;
-    cancelledRef.current = false;
-
-    let stopped = false;
-    (async () => {
-      let nextIndex = batchesDone;
-      let rateLimitBackoffMs = 0;
-      while (!stopped && !cancelledRef.current) {
-        if (nextIndex >= batchesTotal) break;
-        const r = await actionGenerateBatch(job.id, nextIndex, runnerIdRef.current);
-        if (cancelledRef.current) break;
-
-        // Lease lost — another orchestrator (different browser/laptop) is the active runner.
-        // Stop our loop and surface the take-over banner.
-        if (r.status === "lease_lost") {
-          setOtherRunner({ id: r.currentRunnerId ?? null, ageMs: r.heartbeatAgeMs ?? null });
-          break;
-        }
-
-        setBatchesDone(r.batchesDone);
-        if (r.anchorsAdded) setAnchorsCount((c) => c + r.anchorsAdded);
-
-        if (r.status === "succeeded") {
-          setStatus("succeeded");
-          setLastError(null);
-          break;
-        }
-        if (r.status === "cancelled") {
-          setStatus("cancelled");
-          break;
-        }
-        if (r.status === "paused") {
-          setStatus("paused");
-          break;
-        }
-        if (r.status === "failed" || r.status === "partial") {
-          setStatus(r.status);
-          setLastError(r.message);
-          break;
-        }
-        if (r.rateLimited) {
-          // Exponential backoff capped at 30s
-          rateLimitBackoffMs = Math.min(30000, rateLimitBackoffMs ? rateLimitBackoffMs * 2 : 3000);
-          setLastError(`Rate-limited, waiting ${Math.round(rateLimitBackoffMs / 1000)}s before retrying batch ${nextIndex + 1}…`);
-          await sleep(rateLimitBackoffMs);
-          continue; // retry same batch
-        }
-        rateLimitBackoffMs = 0;
-        setLastError(null);
-        nextIndex = r.batchesDone;
-        // Polite gap between batches.
-        await sleep(1500);
-      }
-      orchestratingRef.current = false;
-      router.refresh();
-    })();
-
-    return () => {
-      stopped = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, job.id, blockedByOtherTab, blockedByOtherHost]);
-
-  // Poll the lease while we're blocked by another host so the displayed "last activity Xs ago"
-  // stays current AND so we automatically resume if the other runner finishes naturally
-  // (lease becomes stale, our next claim attempt would succeed).
-  React.useEffect(() => {
-    if (!blockedByOtherHost) return;
+    if (status !== "running") { setStuckHintShown(false); return; }
     let cancelled = false;
+    let lastBatchesDone = batchesDone;
+    let lastAnchorsCount = anchorsCount;
     const tick = async () => {
-      const lease = await actionGetRunnerLease(job.id);
-      if (cancelled) return;
-      // Lease released or became stale → clear our block; orchestrator effect will re-fire
-      // because blockedByOtherHost flips to false and status is still "running".
-      const STALE_MS = 120_000;
-      if (lease.runnerId === null || (lease.heartbeatAgeMs !== null && lease.heartbeatAgeMs > STALE_MS)) {
-        setOtherRunner(null);
-        return;
-      }
-      setOtherRunner({ id: lease.runnerId, ageMs: lease.heartbeatAgeMs });
-    };
-    const id = window.setInterval(tick, 3000);
-    return () => { cancelled = true; window.clearInterval(id); };
-  }, [blockedByOtherHost, job.id]);
+      const snap = await actionGetJobStatus(job.id);
+      if (cancelled || !snap) return;
 
-  async function takeOverFromOtherHost() {
-    await actionTakeOverRunner(job.id, runnerIdRef.current);
-    setOtherRunner(null);
-    // Orchestrator effect will re-fire because blockedByOtherHost just flipped to false.
-  }
+      const advanced = snap.batchesDone !== lastBatchesDone || snap.anchorsCount !== lastAnchorsCount;
+      lastBatchesDone = snap.batchesDone;
+      lastAnchorsCount = snap.anchorsCount;
+
+      setBatchesDone(snap.batchesDone);
+      setAnchorsCount(snap.anchorsCount);
+      setLastError(snap.lastError);
+
+      // Status changed off "running" → propagate, refresh page so anchor table loads in full.
+      if (snap.status !== status) {
+        setStatus(snap.status as typeof status);
+        if (snap.status === "succeeded" || snap.status === "partial" || snap.status === "failed") {
+          router.refresh();
+        }
+      }
+
+      // Stuck detection: status=running, server reports no live loop, AND heartbeat is stale
+      // (or never existed). This catches "server restarted mid-run" without false-firing on
+      // the brief gap between Resume and the first heartbeat.
+      const heartbeatAgeMs = snap.runnerHeartbeatAt == null ? null : Date.now() - snap.runnerHeartbeatAt;
+      const heartbeatStale = heartbeatAgeMs == null || heartbeatAgeMs > 30_000;
+      if (!advanced && !snap.loopAlive && heartbeatStale) {
+        setStuckHintShown(true);
+      } else if (advanced || snap.loopAlive) {
+        setStuckHintShown(false);
+      }
+    };
+    void tick(); // immediate first poll
+    const id = window.setInterval(tick, 2500);
+    return () => { cancelled = true; window.clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, job.id]);
 
   async function pause() {
-    cancelledRef.current = true;
     await actionPauseGeneration(job.id);
     setStatus("paused");
     toast(t("jobView.toasts.pausedToast"), "info");
@@ -439,39 +368,29 @@ export function JobView({ job }: { job: Job }) {
         </div>
       </div>
 
-      {blockedByOtherTab && (
-        <Card className="border-[var(--color-warn)]/40 bg-[var(--color-warn)]/5">
+      {isRunning && !stuckHintShown && (
+        <Card className="border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5">
           <CardBody className="flex items-start gap-3 py-3">
-            <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0 text-[var(--color-warn)]" />
-            <div className="flex-1 min-w-0 text-sm">
-              <div className="font-medium">{t("jobView.runStatus.blockedByTabTitle")}</div>
-              <div className="text-xs text-[var(--color-text-dim)] mt-0.5">
-                {t("jobView.runStatus.blockedByTabBodyPre")}
-                <button type="button" className="underline font-medium text-[var(--color-warn)]" onClick={tabLock.takeOver}>
-                  {t("jobView.runStatus.blockedByTabAction")}
-                </button>
-                {t("jobView.runStatus.blockedByTabBodyPost")}
-              </div>
+            <Info className="h-4 w-4 mt-0.5 flex-shrink-0 text-[var(--color-accent)]" />
+            <div className="flex-1 min-w-0 text-xs text-[var(--color-text-dim)]">
+              {t("jobView.runStatus.backgroundInfo")}
             </div>
           </CardBody>
         </Card>
       )}
 
-      {blockedByOtherHost && !blockedByOtherTab && (
+      {isRunning && stuckHintShown && (
         <Card className="border-[var(--color-warn)]/40 bg-[var(--color-warn)]/5">
           <CardBody className="flex items-start gap-3 py-3">
             <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0 text-[var(--color-warn)]" />
             <div className="flex-1 min-w-0 text-sm">
-              <div className="font-medium">{t("jobView.runStatus.blockedByHostTitle")}</div>
+              <div className="font-medium">{t("jobView.runStatus.stuckTitle")}</div>
               <div className="text-xs text-[var(--color-text-dim)] mt-0.5">
-                {t("jobView.runStatus.blockedByHostBodyPre")}
-                {otherRunner?.ageMs !== null && otherRunner?.ageMs !== undefined &&
-                  t("jobView.runStatus.blockedByHostAge", { sec: String(Math.max(0, Math.round(otherRunner.ageMs / 1000))) })}
-                {t("jobView.runStatus.blockedByHostBodyMid")}
-                <button type="button" className="underline font-medium text-[var(--color-warn)]" onClick={takeOverFromOtherHost}>
-                  {t("jobView.runStatus.blockedByHostAction")}
+                {t("jobView.runStatus.stuckBodyPre")}
+                <button type="button" className="underline font-medium text-[var(--color-warn)]" onClick={resume}>
+                  {t("jobView.runStatus.stuckAction")}
                 </button>
-                {t("jobView.runStatus.blockedByHostBodyPost")}
+                {t("jobView.runStatus.stuckBodyPost")}
               </div>
             </div>
           </CardBody>
@@ -487,7 +406,7 @@ export function JobView({ job }: { job: Job }) {
         targetTotal={(job.inputs ?? []).length}
         onResume={resume}
         onClearError={() => setLastError(null)}
-        canResume={(isFailed || isPaused) && batchesDone < batchesTotal && !blockedByOtherTab && !blockedByOtherHost}
+        canResume={(isFailed || isPaused) && batchesDone < batchesTotal}
       />
 
       <ComparisonPanel job={job} />

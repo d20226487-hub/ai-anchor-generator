@@ -4,17 +4,15 @@ import { revalidatePath } from "next/cache";
 import { loadSettings, mergeIncomingSettings, redactSettings, saveSettings } from "./settings";
 import {
   appendJobAnchors,
-  claimOrRefreshRunnerLease,
   clearJobAnchors,
   clearRunnerLease,
   createJob,
   deleteJob,
+  deleteJobs,
   forceClaimRunnerLease,
   getAnchorsByIds,
   getJob,
   getRunnerLease,
-  incrementBatchesDone,
-  releaseRunnerLease,
   renameJob,
   replaceJobAnchors,
   setJobStatus,
@@ -23,14 +21,14 @@ import {
   updateAnchorsByMap,
   updateJob,
 } from "./jobs";
-import { callProvider, pingProvider } from "./providers";
+import { isLoopRunning, runJobLoop, stopJobLoop } from "./jobLoop";
+import { pingProvider, callProvider } from "./providers";
 import { composeGenerationPrompt, composeRegenerationPrompt } from "./anchors/compose";
-import { planBatch, planBatches } from "./anchors/batchPlan";
+import { planBatches } from "./anchors/batchPlan";
 import { planRebalance, type RebalanceMode } from "./anchors/rebalance";
-import { brandKeyOf as brandKeyForAnchor } from "./anchors/brands";
+import { brandKeyOf as brandKeyForAnchor, brandKeyOf, matchBrand } from "./anchors/brands";
 import { db } from "./db";
 import { parseAnchorsResponse, parseRegenResponse } from "./anchors/parse";
-import { matchBrand, brandKeyOf } from "./anchors/brands";
 import { quickFixDofollowRatio } from "./anchors/quickfix";
 import type { Brand, JobCriteria, JobMode, Locale, ProviderId, SettingsBlob, Theme, JobAnchor } from "./types";
 import { uid } from "./utils";
@@ -119,13 +117,26 @@ export async function actionUpdateJob(args: UpdateJobArgs): Promise<void> {
 }
 
 export async function actionDeleteJob(id: string): Promise<void> {
+  // Stop any in-process loop for this job before deleting so it doesn't try to
+  // operate on a non-existent row mid-batch.
+  stopJobLoop(id);
   await deleteJob(id);
   revalidatePath("/");
 }
 
-// ----- Batched Generation -----
+/**
+ * Bulk delete jobs. Stops any running loops first. Returns the number of jobs
+ * actually removed (may be less than ids.length if some were already gone).
+ */
+export async function actionDeleteJobs(ids: string[]): Promise<{ ok: boolean; deleted: number }> {
+  if (ids.length === 0) return { ok: false, deleted: 0 };
+  for (const id of ids) stopJobLoop(id);
+  const deleted = await deleteJobs(ids);
+  revalidatePath("/");
+  return { ok: true, deleted };
+}
 
-const RATE_LIMIT_HINTS = /rate|429|too many requests|quota/i;
+// ----- Batched Generation (server-side background loop) -----
 
 export interface StartGenerationResult {
   ok: boolean;
@@ -135,8 +146,10 @@ export interface StartGenerationResult {
 }
 
 /**
- * Mark the job as running, plan the batches, clear any prior anchors. Does NOT call the AI —
- * that happens via actionGenerateBatch (orchestrated by the client).
+ * Set up the job for generation and kick off the SERVER-SIDE background loop.
+ * Returns immediately — generation continues in the Next.js server process even
+ * if the user closes the browser tab. The browser polls actionGetJobStatus for
+ * progress updates.
  */
 export async function actionStartGeneration(
   jobId: string,
@@ -150,22 +163,23 @@ export async function actionStartGeneration(
   const planned = planBatches(job.criteria, inputs, opts.batchInputSize ?? 10);
 
   if (opts.resume) {
-    // Don't touch anchors or progress — just flip status back to running so the orchestrator
-    // can pick up at job.batchesDone. We do NOT clear the runner lease — if some other browser
-    // is actively running, the new orchestrator's claim will fail and the user will see the
-    // "another runner is active" banner with a Take-Over button.
-    await setJobStatus(jobId, "running", {
-      lastError: null,
-      runStartedAt: Date.now(),
-    });
+    // Don't touch anchors or progress — just flip status back to running and clear the
+    // (possibly stale) lease so the new server loop can claim it immediately. After a
+    // server restart the in-process loop is gone but the DB still has status=running;
+    // Resume re-spawns the loop.
+    await clearRunnerLease(jobId);
+    await setJobStatus(jobId, "running", { lastError: null, runStartedAt: Date.now() });
+    runJobLoop(jobId);
     revalidatePath(`/jobs/${jobId}`);
     return { ok: true, message: "Resumed", batchSize: job.batchSize, batchesTotal: job.batchesTotal };
   }
 
+  // Stop any lingering loop (e.g. user clicked Rerun while a previous run was active).
+  stopJobLoop(jobId);
+
   if (opts.resetAnchors !== false) {
     await clearJobAnchors(jobId);
   }
-  // Fresh start — clear any stale lease so the new orchestrator can claim immediately.
   await clearRunnerLease(jobId);
   await setJobStatus(jobId, "running", {
     lastError: null,
@@ -174,170 +188,15 @@ export async function actionStartGeneration(
     runStartedAt: Date.now(),
     resetBatchesDone: true,
   });
+  runJobLoop(jobId);
   revalidatePath(`/jobs/${jobId}`);
   return { ok: true, message: "Generation started", batchSize: planned.batchSize, batchesTotal: planned.batchesTotal };
-}
-
-export interface BatchResult {
-  ok: boolean;
-  message: string;
-  rateLimited?: boolean;
-  batchIndex: number;
-  batchesDone: number;
-  batchesTotal: number;
-  status: "running" | "succeeded" | "failed" | "partial" | "cancelled" | "paused" | "lease_lost";
-  anchorsAdded: number;
-  rawSample?: string;
-  /** When status==="lease_lost", who currently holds the lease and how stale they are. */
-  currentRunnerId?: string | null;
-  heartbeatAgeMs?: number | null;
-}
-
-export async function actionGenerateBatch(jobId: string, batchIndex: number, runnerId: string): Promise<BatchResult> {
-  const settings = await loadSettings();
-  const job = await getJob(jobId);
-  if (!job) {
-    return { ok: false, message: "Job not found", batchIndex, batchesDone: 0, batchesTotal: 0, status: "failed", anchorsAdded: 0 };
-  }
-  if (job.status === "cancelled") {
-    return { ok: false, message: "Cancelled", batchIndex, batchesDone: job.batchesDone, batchesTotal: job.batchesTotal, status: "cancelled", anchorsAdded: 0 };
-  }
-  if (job.status === "paused") {
-    return { ok: false, message: "Paused", batchIndex, batchesDone: job.batchesDone, batchesTotal: job.batchesTotal, status: "paused", anchorsAdded: 0 };
-  }
-
-  // Cross-host two-runner guard: try to claim/refresh the runner lease BEFORE doing any
-  // expensive work (AI call, anchor insert). If another orchestrator currently holds a fresh
-  // lease, bail out — the client will surface a "take over" banner.
-  const lease = await claimOrRefreshRunnerLease(jobId, runnerId);
-  if (!lease.ok) {
-    return {
-      ok: false,
-      message: "Another runner is active",
-      batchIndex,
-      batchesDone: job.batchesDone,
-      batchesTotal: job.batchesTotal,
-      status: "lease_lost",
-      anchorsAdded: 0,
-      currentRunnerId: lease.currentRunnerId,
-      heartbeatAgeMs: lease.heartbeatAgeMs,
-    };
-  }
-
-  const inputs = job.inputs ?? [];
-  const existing = job.anchors ?? [];
-
-  const { inputsInBatch, hints } = planBatch({
-    batchIndex,
-    batchesTotal: job.batchesTotal || 1,
-    batchSize: job.batchSize || 10,
-    inputs,
-    criteria: job.criteria,
-    existingAnchors: existing,
-  });
-
-  if (inputsInBatch.length === 0) {
-    // Already past last batch — mark succeeded.
-    const status = existing.length > 0 ? "succeeded" : "failed";
-    await setJobStatus(jobId, status, { lastError: status === "failed" ? "No batches produced anchors" : null });
-    await releaseRunnerLease(jobId, runnerId);
-    revalidatePath(`/jobs/${jobId}`);
-    return { ok: true, message: "No more batches", batchIndex, batchesDone: job.batchesDone, batchesTotal: job.batchesTotal, status, anchorsAdded: 0 };
-  }
-
-  const prompt = composeGenerationPrompt({
-    template: settings.prompts.generation,
-    mode: job.mode,
-    criteria: job.criteria,
-    inputs: inputsInBatch,
-    batch: hints,
-  });
-
-  let raw: string;
-  try {
-    raw = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    const rateLimited = RATE_LIMIT_HINTS.test(message);
-    if (!rateLimited) {
-      // Persist the error and mark the job failed (or partial if we already produced anchors).
-      const finalStatus = existing.length > 0 ? "partial" : "failed";
-      await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
-      await releaseRunnerLease(jobId, runnerId);
-      revalidatePath(`/jobs/${jobId}`);
-    }
-    return { ok: false, message, rateLimited, batchIndex, batchesDone: job.batchesDone, batchesTotal: job.batchesTotal, status: rateLimited ? "running" : (existing.length > 0 ? "partial" : "failed"), anchorsAdded: 0 };
-  }
-
-  let parsed: ReturnType<typeof parseAnchorsResponse>;
-  try {
-    parsed = parseAnchorsResponse(raw);
-  } catch (e) {
-    const message = `Could not parse AI output: ${e instanceof Error ? e.message : String(e)}`;
-    const finalStatus = existing.length > 0 ? "partial" : "failed";
-    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
-    await releaseRunnerLease(jobId, runnerId);
-    revalidatePath(`/jobs/${jobId}`);
-    return { ok: false, message, batchIndex, batchesDone: job.batchesDone, batchesTotal: job.batchesTotal, status: finalStatus, anchorsAdded: 0, rawSample: raw.slice(0, 800) };
-  }
-
-  if (parsed.length === 0) {
-    // Empty batch — count it as done so we don't loop forever, but flag a warning.
-    await incrementBatchesDone(jobId);
-    const isLast = batchIndex + 1 >= job.batchesTotal;
-    const finalStatus = isLast ? (existing.length > 0 ? "partial" : "failed") : "running";
-    if (isLast) {
-      await setJobStatus(jobId, finalStatus, { lastError: "Last batch returned no anchors." });
-      await releaseRunnerLease(jobId, runnerId);
-    }
-    revalidatePath(`/jobs/${jobId}`);
-    return { ok: false, message: "AI returned no anchors for this batch", batchIndex, batchesDone: job.batchesDone + 1, batchesTotal: job.batchesTotal, status: finalStatus, anchorsAdded: 0, rawSample: raw.slice(0, 400) };
-  }
-
-  // Map parsed anchors back to inputs/brands. Only accept URLs that match an input in THIS batch
-  // — otherwise we'd accept hallucinated URLs.
-  const batchUrlSet = new Map(inputsInBatch.map((i) => [i.targetUrl.toLowerCase(), i]));
-  const anchors = parsed
-    .map((p) => {
-      const matched = batchUrlSet.get(p.targetUrl.toLowerCase());
-      if (!matched) return null;
-      const brand = matchBrand(matched.targetUrl, job.criteria.brands);
-      return {
-        inputId: matched.id,
-        targetUrl: matched.targetUrl,
-        brandId: brand?.id ?? null,
-        followStatus: job.criteria.ratiosEnabled ? (p.followStatus ?? "dofollow") : null,
-        anchorText: p.anchorText,
-        category: p.category,
-      };
-    })
-    .filter((x): x is NonNullable<typeof x> => x !== null);
-
-  await appendJobAnchors(jobId, anchors);
-  await incrementBatchesDone(jobId);
-
-  const newBatchesDone = job.batchesDone + 1;
-  const isLastBatch = newBatchesDone >= job.batchesTotal;
-  if (isLastBatch) {
-    await setJobStatus(jobId, "succeeded", { lastError: null });
-    await releaseRunnerLease(jobId, runnerId);
-  }
-  revalidatePath(`/jobs/${jobId}`);
-
-  return {
-    ok: true,
-    message: `Batch ${batchIndex + 1} added ${anchors.length} anchors`,
-    batchIndex,
-    batchesDone: newBatchesDone,
-    batchesTotal: job.batchesTotal,
-    status: isLastBatch ? "succeeded" : "running",
-    anchorsAdded: anchors.length,
-  };
 }
 
 export async function actionCancelGeneration(jobId: string): Promise<void> {
   const job = await getJob(jobId);
   if (!job) return;
+  stopJobLoop(jobId);
   await setJobStatus(jobId, "cancelled", { lastError: null });
   await clearRunnerLease(jobId);
   revalidatePath(`/jobs/${jobId}`);
@@ -346,9 +205,47 @@ export async function actionCancelGeneration(jobId: string): Promise<void> {
 export async function actionPauseGeneration(jobId: string): Promise<void> {
   const job = await getJob(jobId);
   if (!job) return;
+  stopJobLoop(jobId);
   await setJobStatus(jobId, "paused", { lastError: null });
   await clearRunnerLease(jobId);
   revalidatePath(`/jobs/${jobId}`);
+}
+
+// ----- Status polling (replaces the client-orchestrator return value) -----
+
+export interface JobStatusSnapshot {
+  status: string;
+  batchesDone: number;
+  batchesTotal: number;
+  lastError: string | null;
+  anchorsCount: number;
+  runnerHeartbeatAt: number | null;
+  loopAlive: boolean;
+}
+
+/**
+ * Lightweight read of job status for browser polling. Returns just what the
+ * RunStatusPanel needs to render — does NOT pull anchors or inputs.
+ */
+export async function actionGetJobStatus(jobId: string): Promise<JobStatusSnapshot | null> {
+  const c = await db();
+  const r = await c.execute({
+    sql: `SELECT status, batches_done, batches_total, last_error, runner_heartbeat_at,
+                 (SELECT COUNT(*) FROM job_anchors WHERE job_id = jobs.id) AS anchors_count
+          FROM jobs WHERE id = ?`,
+    args: [jobId],
+  });
+  const row = r.rows[0] as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    status: String(row.status ?? "idle"),
+    batchesDone: Number(row.batches_done ?? 0),
+    batchesTotal: Number(row.batches_total ?? 0),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    anchorsCount: Number(row.anchors_count ?? 0),
+    runnerHeartbeatAt: row.runner_heartbeat_at == null ? null : Number(row.runner_heartbeat_at),
+    loopAlive: isLoopRunning(jobId),
+  };
 }
 
 // ----- Runner lease (cross-host two-runner guard) -----
@@ -502,26 +399,6 @@ async function deleteAnchorsByIds(ids: string[]): Promise<void> {
   const c = await db();
   const placeholders = ids.map(() => "?").join(",");
   await c.execute({ sql: `DELETE FROM job_anchors WHERE id IN (${placeholders})`, args: ids });
-}
-
-export interface JobStatusSnapshot {
-  status: string;
-  batchesDone: number;
-  batchesTotal: number;
-  lastError: string | null;
-  anchorsCount: number;
-}
-
-export async function actionGetJobStatus(jobId: string): Promise<JobStatusSnapshot | null> {
-  const job = await getJob(jobId);
-  if (!job) return null;
-  return {
-    status: job.status,
-    batchesDone: job.batchesDone,
-    batchesTotal: job.batchesTotal,
-    lastError: job.lastError,
-    anchorsCount: (job.anchors ?? []).length,
-  };
 }
 
 // ----- Regenerate (subset) -----
