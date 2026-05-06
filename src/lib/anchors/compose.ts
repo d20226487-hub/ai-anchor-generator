@@ -1,10 +1,25 @@
 import type { Brand, JobCriteria, JobInput, JobMode, JobAnchor } from "../types";
+import { matchBrand } from "./brands";
+
+/** Resolve the language for an input — multi-site looks up the matched brand, single-site
+ *  uses the job-level criteria.language. Falls back to "en" so older jobs without language
+ *  data still render a valid prompt. */
+function resolveInputLanguage(targetUrl: string, mode: JobMode, criteria: JobCriteria): string {
+  if (mode === "multi_site") {
+    const brand = matchBrand(targetUrl, criteria.brands);
+    return (brand?.language || "en");
+  }
+  return (criteria.language || "en");
+}
 
 interface ComposeArgs {
   template: string;
   mode: JobMode;
   criteria: JobCriteria;
-  inputs: Pick<JobInput, "targetUrl" | "title" | "keywords">[];
+  /** Each entry MUST include `id` so the AI can echo it back; this is how anchors map
+   *  to inputs — two rows with the same `targetUrl` are still distinct because their
+   *  ids differ (fixes the URL-collision dedup bug). */
+  inputs: Pick<JobInput, "id" | "targetUrl" | "title" | "keywords">[];
   batch?: BatchHints;
 }
 
@@ -69,8 +84,10 @@ export function composeGenerationPrompt(args: ComposeArgs): string {
       ? "(No brands specified — invent natural brand-style mentions where needed using the URL's domain.)"
       : criteria.brands
           .map(
-            (b: Brand) =>
-              `- ${b.name} → domains: ${b.domains.length ? b.domains.join(", ") : "(none)"}`
+            (b: Brand) => {
+              const lang = b.language ? ` [language: ${b.language}]` : "";
+              return `- ${b.name} → domains: ${b.domains.length ? b.domains.join(", ") : "(none)"}${lang}`;
+            }
           )
           .join("\n");
 
@@ -81,7 +98,12 @@ export function composeGenerationPrompt(args: ComposeArgs): string {
 
   const entriesBlock = inputs
     .map((e, i) => {
-      const parts = [`${i + 1}. Target URL: ${e.targetUrl}`];
+      const lang = resolveInputLanguage(e.targetUrl, mode, criteria);
+      const parts = [
+        `${i + 1}. id: ${e.id}`,
+        `   Target URL: ${e.targetUrl}`,
+        `   Language: ${lang}`,
+      ];
       if (e.title) parts.push(`   Title: ${e.title}`);
       if (e.keywords) parts.push(`   Keywords: ${e.keywords}`);
       return parts.join("\n");

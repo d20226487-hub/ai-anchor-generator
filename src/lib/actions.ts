@@ -356,18 +356,35 @@ export async function actionRebalanceBrand(
       return { ok: false, message: "AI returned no usable anchors", brandKey, deleted: 0, added: 0, warnings: plan.warnings };
     }
 
-    const inputByUrl = new Map(inputs.map((i) => [i.targetUrl.toLowerCase(), i]));
+    // Same id-based + URL-fallback strategy as the main batch loop (jobLoop.ts).
+    // Primary key = input id (collision-free even when many rows share a URL).
+    // Fallback = URL match, but only for URLs that occur exactly once in the batch.
+    const inputById = new Map(inputs.map((i) => [i.id, i]));
+    const urlOcc = new Map<string, number>();
+    for (const i of inputs) {
+      const k = i.targetUrl.toLowerCase();
+      urlOcc.set(k, (urlOcc.get(k) ?? 0) + 1);
+    }
+    const uniqueUrlMap = new Map<string, typeof inputs[number]>();
+    for (const i of inputs) {
+      const k = i.targetUrl.toLowerCase();
+      if (urlOcc.get(k) === 1) uniqueUrlMap.set(k, i);
+    }
     const newAnchors = parsed
       .map((p) => {
-        const matched = inputByUrl.get(p.targetUrl.toLowerCase());
+        // `||` (not `??`) so empty-string id falls through to URL fallback.
+        const matched = (p.id ? inputById.get(p.id) : undefined)
+          || (p.targetUrl ? uniqueUrlMap.get(p.targetUrl.toLowerCase()) : undefined)
+          || null;
         if (!matched) return null;
         const b = brands.find((x) => x.id === brandKey) ?? null;
+        const anchorText = p.category === "url" ? matched.targetUrl : p.anchorText;
         return {
           inputId: matched.id,
           targetUrl: matched.targetUrl,
           brandId: b?.id ?? null,
           followStatus: job.criteria.ratiosEnabled ? (p.followStatus ?? "dofollow") : null,
-          anchorText: p.anchorText,
+          anchorText,
           category: p.category,
         };
       })
@@ -488,11 +505,15 @@ export async function actionPreviewPrompt(args: {
   inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null }>;
 }): Promise<string> {
   const settings = await loadSettings();
+  // The preview is for inputs that haven't been saved yet, so they have no real DB ids.
+  // Synthesise stable preview ids — these never reach the DB; they only make the prompt
+  // look representative of what the live AI call would see.
+  const inputsWithIds = args.inputs.map((i, idx) => ({ ...i, id: `preview_${idx + 1}` }));
   return composeGenerationPrompt({
     template: settings.prompts.generation,
     mode: args.mode,
     criteria: args.criteria,
-    inputs: args.inputs,
+    inputs: inputsWithIds,
   });
 }
 

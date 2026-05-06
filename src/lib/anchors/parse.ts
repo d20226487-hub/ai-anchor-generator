@@ -1,6 +1,10 @@
 import type { AnchorCategory, FollowStatus } from "../types";
 
 export interface ParsedAnchor {
+  /** The input entry id the AI echoed back. Empty string if missing — caller decides
+   *  whether to fall back to URL-based matching for backwards compatibility. */
+  id: string;
+  /** Optional URL the AI returned. Only used when id is missing (legacy AI responses). */
   targetUrl: string;
   anchorText: string;
   category: AnchorCategory;
@@ -49,17 +53,17 @@ export function parseAnchorsResponse(raw: string): ParsedAnchor[] {
   for (const item of arr) {
     if (!item || typeof item !== "object") continue;
     const i = item as Record<string, unknown>;
+    const id = typeof i.id === "string" ? i.id.trim().slice(0, MAX_ID_LEN) : "";
     const targetUrl = typeof i.targetUrl === "string" ? i.targetUrl.trim().slice(0, MAX_TARGET_URL_LEN) : "";
-    let anchorText = typeof i.anchorText === "string" ? i.anchorText.trim().slice(0, MAX_ANCHOR_TEXT_LEN) : "";
+    const anchorText = typeof i.anchorText === "string" ? i.anchorText.trim().slice(0, MAX_ANCHOR_TEXT_LEN) : "";
     const catRaw = typeof i.category === "string" ? i.category.toLowerCase() : "";
     const category = (CATS as string[]).includes(catRaw) ? (catRaw as AnchorCategory) : "generic";
-    // For URL category, force the anchor text to be exactly the Target URL — the AI sometimes
-    // returns "click here" or a stripped version even when it categorized correctly.
-    if (category === "url" && targetUrl) anchorText = targetUrl;
     const followRaw = typeof i.followStatus === "string" ? i.followStatus.toLowerCase() : undefined;
     const followStatus = followRaw && (FOLLOW as string[]).includes(followRaw) ? (followRaw as FollowStatus) : undefined;
-    if (!targetUrl || !anchorText) continue;
-    out.push({ targetUrl, anchorText, category, followStatus });
+    // Drop entries with no anchorText AND no way to map back (no id or url).
+    if (!anchorText) continue;
+    if (!id && !targetUrl) continue;
+    out.push({ id, targetUrl, anchorText, category, followStatus });
   }
   return out;
 }

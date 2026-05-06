@@ -216,17 +216,38 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
     return { kind: "running", message: "Empty batch (continuing)", anchorsAdded: 0 };
   }
 
-  // Map parsed anchors back to inputs/brands. Reject hallucinated URLs.
-  const batchUrlSet = new Map(inputsInBatch.map((i) => [i.targetUrl.toLowerCase(), i]));
+  // Map parsed anchors back to inputs. PRIMARY key = input id (echoed by AI) —
+  // this is collision-free even when many inputs share the same Target URL.
+  // FALLBACK = URL match (legacy responses that miss the id field). The URL fallback
+  // is only safe when its matches are unique within the batch — we filter out URLs
+  // that appear on >1 input to avoid the dedup bug.
+  const batchById = new Map(inputsInBatch.map((i) => [i.id, i]));
+  const urlOccurrences = new Map<string, number>();
+  for (const i of inputsInBatch) {
+    const k = i.targetUrl.toLowerCase();
+    urlOccurrences.set(k, (urlOccurrences.get(k) ?? 0) + 1);
+  }
+  const uniqueUrlMap = new Map<string, typeof inputsInBatch[number]>();
+  for (const i of inputsInBatch) {
+    const k = i.targetUrl.toLowerCase();
+    if (urlOccurrences.get(k) === 1) uniqueUrlMap.set(k, i);
+  }
   const anchors = parsed
     .map((p) => {
-      const matched = batchUrlSet.get(p.targetUrl.toLowerCase());
+      // `||` (not `??`) so empty-string id falls through to URL fallback —
+      // `??` only triggers on null/undefined, leaving empty strings as final values.
+      const matched = (p.id ? batchById.get(p.id) : undefined)
+        || (p.targetUrl ? uniqueUrlMap.get(p.targetUrl.toLowerCase()) : undefined)
+        || null;
       if (!matched) return null;
       const brand = matchBrand(matched.targetUrl, job.criteria.brands);
+      // For URL-category anchors, force anchorText to the matched input's URL.
+      // (The AI sometimes drops the scheme or paraphrases.)
+      const anchorText = p.category === "url" ? matched.targetUrl : p.anchorText;
       return {
         inputId: matched.id, targetUrl: matched.targetUrl, brandId: brand?.id ?? null,
         followStatus: job.criteria.ratiosEnabled ? (p.followStatus ?? "dofollow") : null,
-        anchorText: p.anchorText, category: p.category,
+        anchorText, category: p.category,
       };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);

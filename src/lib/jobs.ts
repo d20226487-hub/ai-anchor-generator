@@ -7,6 +7,12 @@ function rowToJob(r: Record<string, unknown>): Job {
   const criteria = JSON.parse(String(r.criteria)) as JobCriteria;
   // Backward-compat: older jobs may not have url% in their distribution.
   criteria.distribution = normalizeDistribution(criteria.distribution);
+  // Backward-compat: older jobs predate per-job and per-brand language → default null.
+  // Compose silently falls back to "en" so existing jobs still produce a valid prompt.
+  if (!("language" in criteria) || criteria.language === undefined) criteria.language = null;
+  for (const b of criteria.brands ?? []) {
+    if (!("language" in b) || b.language === undefined) b.language = null;
+  }
   return {
     id: String(r.id),
     name: String(r.name),

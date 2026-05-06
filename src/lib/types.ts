@@ -12,7 +12,20 @@ export interface Brand {
   id: string;
   name: string;
   domains: string[];
+  /** ISO 639-1 language code the AI should write anchors in for this brand's URLs.
+   *  Required for new jobs (UI enforces). Optional in the type to keep older jobs
+   *  loadable; when null the prompt falls back to "en" silently. */
+  language: string | null;
 }
+
+/** Curated list of ISO 639-1 codes shown in the language dropdowns. Display labels
+ *  live in i18n (`form.lang.<code>`). Add to this list to surface more in the UI. */
+export const SUPPORTED_LANGUAGES = [
+  "en", "es", "fr", "de", "it", "pt", "ru", "uk",
+  "pl", "nl", "tr", "ar", "ja", "ko", "zh", "sv",
+  "da", "no", "fi", "cs", "ro", "hu", "el",
+] as const;
+export type LanguageCode = typeof SUPPORTED_LANGUAGES[number];
 
 export interface DistributionPct {
   generic: number;
@@ -37,6 +50,10 @@ export interface JobCriteria {
   brands: Brand[];
   providerId: ProviderId;
   model: string;
+  /** Single-site mode only: applies to ALL inputs in the job. Required for new jobs
+   *  in single-site mode (UI enforces). For multi-site mode this is ignored — language
+   *  is per-brand instead. */
+  language: string | null;
 }
 
 export interface JobInput {

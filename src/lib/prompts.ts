@@ -31,12 +31,15 @@ For each entry, you receive:
 
 ## Output rules
 - Output ONLY a JSON object with a single key "anchors" — no prose, no markdown, no code fences.
-- Each anchor object: { "targetUrl": string, "anchorText": string, "category": "generic"|"branded"|"keyword", "followStatus": "dofollow"|"nofollow" }
+- Each anchor object: { "id": string, "anchorText": string, "category": "generic"|"branded"|"keyword"|"url", "followStatus": "dofollow"|"nofollow" }
+- "id" MUST be the exact id string from one of the Target entries below (entries are tagged "id: <…>"). This is how anchors map back to inputs — DO NOT invent ids, DO NOT skip the id field, DO NOT reuse the same id more times than that entry should receive anchors.
+- Two different entries may share the same Target URL — they are still DISTINCT entries with distinct ids; treat them as separate anchor slots.
 - "followStatus" is only required if dofollow ratio is enabled (see ratios above). Otherwise omit it.
-- "targetUrl" must exactly match one of the Target URLs given.
 - Anchor texts should look natural — vary length, casing, phrasing. Avoid repetition.
-- Branded anchors must reference the brand mapped to that URL (by domain).
+- Branded anchors must reference the brand mapped to that entry's URL (by domain).
 - Keyword anchors should weave provided keywords naturally — do not just dump keywords verbatim every time.
+- URL anchors: the "anchorText" MUST be exactly the entry's Target URL, character-for-character (with the https:// scheme), no extra words, no surrounding markup.
+- Language: each entry has a "Language" tag (ISO 639-1 code, e.g. "fr", "es", "ru"). Generate that entry's "anchorText" in that language. Use that language's natural conventions for casing, common phrasings, and brand-name treatment. URL-category anchors are exempt — they are always the bare URL regardless of language.
 
 ## Target entries
 {{ENTRIES_BLOCK}}

@@ -12,6 +12,7 @@ import { actionPreviewPrompt } from "@/lib/actions";
 import { PREDEFINED_MODELS } from "@/lib/settings";
 import { parseCsvText, type CsvRow } from "@/lib/anchors/csv";
 import type { Brand, JobCriteria, JobMode, ProviderId, SettingsBlob } from "@/lib/types";
+import { SUPPORTED_LANGUAGES } from "@/lib/types";
 import { uid, clamp } from "@/lib/utils";
 import { Eye, Plus, Trash2, Upload, ClipboardPaste } from "lucide-react";
 import { useT } from "@/lib/i18n/I18nProvider";
@@ -68,6 +69,7 @@ export function JobForm({
   const [providerId, setProviderId] = React.useState<ProviderId>(initial.criteria.providerId);
   const [model, setModel] = React.useState<string>(initial.criteria.model);
   const [brands, setBrands] = React.useState<Brand[]>(initial.criteria.brands);
+  const [language, setLanguage] = React.useState<string>(initial.criteria.language ?? "");
   const [csvText, setCsvText] = React.useState(initial.csvText);
 
   const [parseErrors, setParseErrors] = React.useState<string[]>([]);
@@ -111,6 +113,7 @@ export function JobForm({
       brands,
       providerId,
       model,
+      language: mode === "one_site" ? (language || null) : null,
     };
   }
 
@@ -130,6 +133,18 @@ export function JobForm({
     if (!model.trim()) {
       toast(t("form.needModel"), "error");
       return;
+    }
+    // Language is required. Single-site → criteria.language. Multi-site → every brand.language.
+    if (mode === "one_site" && !language) {
+      toast(t("form.needLanguage"), "error");
+      return;
+    }
+    if (mode === "multi_site") {
+      const missing = brands.find((b) => !b.language);
+      if (missing) {
+        toast(t("form.needBrandLanguage", { name: missing.name || "(unnamed)" }), "error");
+        return;
+      }
     }
     setBusy(kind);
     try {
@@ -227,6 +242,22 @@ export function JobForm({
               </div>
             </CardBody>
           </Card>
+
+          {mode === "one_site" && (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t("form.languageTitle")}</CardTitle>
+                <CardDescription>{t("form.languageDescSingle")}</CardDescription>
+              </CardHeader>
+              <CardBody>
+                <LanguageSelect
+                  value={language}
+                  onChange={setLanguage}
+                  placeholder={t("form.langSelectPlaceholder")}
+                />
+              </CardBody>
+            </Card>
+          )}
 
           {mode === "multi_site" && (
             <Card>
@@ -412,7 +443,7 @@ function BrandsManager({ brands, onChange }: { brands: Brand[]; onChange: (b: Br
   return (
     <div className="space-y-2">
       {brands.map((b, idx) => (
-        <div key={b.id} className="grid grid-cols-[1fr_2fr_auto] gap-2 items-center">
+        <div key={b.id} className="grid grid-cols-[1fr_2fr_140px_auto] gap-2 items-center">
           <Input
             value={b.name}
             onChange={(e) => {
@@ -431,6 +462,15 @@ function BrandsManager({ brands, onChange }: { brands: Brand[]; onChange: (b: Br
             }}
             placeholder="domain1.com, domain2.com"
           />
+          <LanguageSelect
+            value={b.language ?? ""}
+            onChange={(v) => {
+              const next = brands.slice();
+              next[idx] = { ...b, language: v || null };
+              onChange(next);
+            }}
+            placeholder={t("form.langSelectPlaceholder")}
+          />
           <Button variant="ghost" size="sm" onClick={() => onChange(brands.filter((_, j) => j !== idx))}>
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
@@ -440,7 +480,7 @@ function BrandsManager({ brands, onChange }: { brands: Brand[]; onChange: (b: Br
         <Button
           variant="secondary"
           size="sm"
-          onClick={() => onChange([...brands, { id: uid("brand"), name: "", domains: [] }])}
+          onClick={() => onChange([...brands, { id: uid("brand"), name: "", domains: [], language: null }])}
         >
           <Plus className="h-3.5 w-3.5" /> {t("form.addBrand")}
         </Button>
@@ -458,7 +498,7 @@ function BrandsManager({ brands, onChange }: { brands: Brand[]; onChange: (b: Br
               <p className="text-xs text-[var(--color-text-dim)]">{t("form.bulkPasteHint")}</p>
               <Textarea
                 rows={10}
-                placeholder={`Acme | acme.com, acme.io\nWidgetCo\twidgetco.com\nGlobex | globex.example`}
+                placeholder={`Acme | acme.com, acme.io | en\nWidgetCo\twidgetco.com\tfr\nGlobex | globex.example | de`}
                 value={bulkText}
                 onChange={(e) => setBulkText(e.target.value)}
               />
@@ -528,14 +568,32 @@ function parseBulkBrands(text: string): Brand[] {
     const parts = line.includes("\t") ? line.split("\t") : line.split("|");
     const name = (parts[0] ?? "").trim();
     const domainsRaw = (parts[1] ?? "").trim();
+    const langRaw = (parts[2] ?? "").trim().toLowerCase();
     const domains = domainsRaw
       .split(",")
       .map((s) => s.trim().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, ""))
       .filter(Boolean);
     if (!name && domains.length === 0) continue;
-    brands.push({ id: uid("brand"), name, domains });
+    // Accept the language column only if it matches our supported list — otherwise null
+    // and the user must pick from the dropdown.
+    const language = (SUPPORTED_LANGUAGES as readonly string[]).includes(langRaw) ? langRaw : null;
+    brands.push({ id: uid("brand"), name, domains, language });
   }
   return brands;
+}
+
+/** Reusable language dropdown — uses ISO codes as values, displays localized labels.
+ *  Empty value = "not set" and shows the placeholder option. */
+function LanguageSelect({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) {
+  const { t } = useT();
+  return (
+    <Select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{placeholder}</option>
+      {SUPPORTED_LANGUAGES.map((code) => (
+        <option key={code} value={code}>{t(`form.lang.${code}`)} ({code})</option>
+      ))}
+    </Select>
+  );
 }
 
 function PromptPreviewDialog({ getPrompt }: { getPrompt: () => Promise<string> }) {

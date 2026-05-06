@@ -23,6 +23,7 @@ export function NewJobClient({ settings }: { settings: SettingsBlob }) {
       brands: [],
       providerId: settings.defaults.providerId,
       model: settings.defaults.modelByProvider[settings.defaults.providerId] ?? "",
+      language: null,
     },
     csvText: "",
   }), [settings, t, locale]);
