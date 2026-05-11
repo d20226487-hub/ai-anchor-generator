@@ -131,6 +131,12 @@ export function JobView({ job }: { job: Job }) {
   const isRunning = status === "running";
   const isFailed = status === "failed" || status === "partial";
   const isPaused = status === "paused";
+  /** Partial = some anchors produced, then a non-user error/interruption stopped the run.
+   *  Show Resume so users can continue from `batches_done` instead of losing the work to
+   *  Rerun-all. The underlying actionStartGeneration({resume: true}) is status-agnostic —
+   *  it just flips to running and re-spawns the loop. Useful workflow: Edit job → change
+   *  model/provider → Save only → Resume here picks up with the new criteria. */
+  const isPartial = status === "partial";
 
   // Server-side background loop drives generation. The browser is a passive viewer that
   // polls actionGetJobStatus every 2.5s while status==="running" to refresh progress.
@@ -357,6 +363,18 @@ export function JobView({ job }: { job: Job }) {
             <Button onClick={resume} disabled={busy}>
               <Play className="h-3.5 w-3.5" /> {t("common.resume")}
             </Button>
+          ) : isPartial ? (
+            // For partial jobs: PRIMARY = Resume (continue from batches_done, keep
+            // existing anchors). SECONDARY = Rerun all (wipe + restart from batch 0).
+            // Resume covers the model-swap workflow without losing prior progress.
+            <>
+              <Button onClick={resume} disabled={busy}>
+                <Play className="h-3.5 w-3.5" /> {t("common.resume")}
+              </Button>
+              <Button variant="outline" onClick={rerun} disabled={busy}>
+                <RefreshCw className="h-3.5 w-3.5" /> {t("common.rerunAll")}
+              </Button>
+            </>
           ) : (
             <Button variant="outline" onClick={rerun} disabled={busy}>
               <RefreshCw className="h-3.5 w-3.5" /> {t("common.rerunAll")}

@@ -6,10 +6,12 @@ interface Args {
   model: string;
   prompt: string;
   providerId: "openrouter";
+  /** Per-call timeout in ms — comes from per-provider advanced settings, default 60_000. */
+  timeoutMs: number;
 }
 
 export async function callOpenAICompatible(args: Args): Promise<string> {
-  const { apiKey, baseUrl, model, prompt, providerId } = args;
+  const { apiKey, baseUrl, model, prompt, providerId, timeoutMs } = args;
   const label = "OpenRouter";
 
   const headers: Record<string, string> = {
@@ -17,7 +19,12 @@ export async function callOpenAICompatible(args: Args): Promise<string> {
     "X-Title": "AI Anchor Generator",
   };
 
-  const client = new OpenAI({ apiKey, baseURL: baseUrl, defaultHeaders: headers });
+  // Explicit per-call timeout + limited internal retries (1 retry beyond the initial
+  // attempt). The OpenAI SDK defaults are 10 minutes / 2 retries — when the upstream
+  // provider hangs or terminates the connection that default lets one batch block for
+  // up to ~30 minutes silently. With these limits, a stuck call surfaces as an
+  // APIConnectionError within ~2× timeoutMs total and bubbles up to processBatch.
+  const client = new OpenAI({ apiKey, baseURL: baseUrl, defaultHeaders: headers, timeout: timeoutMs, maxRetries: 1 });
 
   try {
     try {

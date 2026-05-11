@@ -23,6 +23,7 @@ import { composeGenerationPrompt } from "./anchors/compose";
 import { planBatch } from "./anchors/batchPlan";
 import { matchBrand } from "./anchors/brands";
 import { parseAnchorsResponse } from "./anchors/parse";
+import { resolveProviderLimits } from "./providers/limits";
 
 const RATE_LIMIT_HINTS = /rate|429|too many requests|quota/i;
 
@@ -73,6 +74,7 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
   // Stable runnerId for this loop's lifetime. Used as the lease holder.
   const runnerId = `server_${crypto.randomUUID()}`;
   let rateLimitBackoffMs = 0;
+  let consecutiveRateLimits = 0;
 
   while (!ac.signal.aborted) {
     // Re-read job at the top of every batch — status / batches_done / criteria may have
@@ -89,6 +91,11 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
       return;
     }
 
+    // Effective per-provider limits — re-resolved each iteration so a settings change
+    // mid-run takes effect at the next batch boundary without restarting the loop.
+    const settings = await loadSettings();
+    const limits = resolveProviderLimits(settings.providers[job.criteria.providerId]);
+
     const result = await processBatch(jobId, job.batchesDone, runnerId);
 
     if (ac.signal.aborted) return;
@@ -102,14 +109,27 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
     }
 
     if (result.kind === "rate_limited") {
+      consecutiveRateLimits++;
+      // Give up after the per-provider cap — flip to partial/failed so the user sees a
+      // real terminal state instead of an invisible infinite retry loop.
+      if (consecutiveRateLimits >= limits.maxRateRetries) {
+        const anchorsCount = job.anchors?.length ?? 0;
+        const finalStatus = anchorsCount > 0 ? "partial" : "failed";
+        await setJobStatus(jobId, finalStatus, {
+          lastError: `Provider rate-limited ${limits.maxRateRetries} times in a row (giving up). Last message: ${result.message}`,
+        });
+        await releaseRunnerLease(jobId, runnerId);
+        return;
+      }
       rateLimitBackoffMs = Math.min(30_000, rateLimitBackoffMs ? rateLimitBackoffMs * 2 : 3_000);
       await sleep(rateLimitBackoffMs, ac.signal);
       continue;
     }
 
-    // Successful batch — pause briefly to be polite to the provider, then continue.
+    // Successful batch — pause to be polite to the provider, then continue.
+    consecutiveRateLimits = 0;
     rateLimitBackoffMs = 0;
-    await sleep(1_500, ac.signal);
+    await sleep(limits.interBatchDelayMs, ac.signal);
   }
 }
 
@@ -185,6 +205,12 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (RATE_LIMIT_HINTS.test(message)) {
+      // Surface the rate-limit reason to the UI even though the loop will retry. Without
+      // this `lastError` stays null and the user sees "running, no progress" with no clue
+      // why. Status stays "running" so the loop keeps the lease and continues retrying.
+      await setJobStatus(jobId, "running", {
+        lastError: `Rate-limited at batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying with backoff…`,
+      });
       return { kind: "rate_limited", message, anchorsAdded: 0 };
     }
     const finalStatus = existing.length > 0 ? "partial" : "failed";

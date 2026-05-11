@@ -3,6 +3,8 @@ interface Args {
   baseUrl: string;
   model: string;
   prompt: string;
+  /** Per-call timeout in ms — comes from per-provider advanced settings, default 60_000. */
+  timeoutMs: number;
 }
 
 interface ChatResponse {
@@ -12,7 +14,7 @@ interface ChatResponse {
 }
 
 export async function callGitHubModels(args: Args): Promise<string> {
-  const { apiKey, baseUrl, model, prompt } = args;
+  const { apiKey, baseUrl, model, prompt, timeoutMs } = args;
 
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
 
@@ -33,9 +35,14 @@ export async function callGitHubModels(args: Args): Promise<string> {
         Authorization: `Token ${apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
-    throw new Error(`GitHub Models: network error — ${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof Error && (e.name === "TimeoutError" || /timeout/i.test(msg))) {
+      throw new Error(`GitHub Models: timed out after ${timeoutMs / 1000}s waiting for response`);
+    }
+    throw new Error(`GitHub Models: network error — ${msg}`);
   }
 
   const text = await res.text();
@@ -61,7 +68,7 @@ export async function callGitHubModels(args: Args): Promise<string> {
     if (res.status === 400) {
       // Retry without response_format — some models on GH Models reject it.
       if (/response_format|json_object/i.test(reason)) {
-        return retryWithoutJsonFormat(url, apiKey, { model: body.model, messages: body.messages, temperature: body.temperature });
+        return retryWithoutJsonFormat(url, apiKey, { model: body.model, messages: body.messages, temperature: body.temperature }, timeoutMs);
       }
       throw new Error(`GitHub Models: 400 Bad Request — ${reason}`);
     }
@@ -78,7 +85,8 @@ export async function callGitHubModels(args: Args): Promise<string> {
 async function retryWithoutJsonFormat(
   url: string,
   apiKey: string,
-  body: { model: string; messages: Array<{ role: string; content: string }>; temperature: number }
+  body: { model: string; messages: Array<{ role: string; content: string }>; temperature: number },
+  timeoutMs: number,
 ): Promise<string> {
   const res = await fetch(url, {
     method: "POST",
@@ -88,6 +96,7 @@ async function retryWithoutJsonFormat(
       Authorization: `Token ${apiKey}`,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`GitHub Models: ${res.status} — ${text.slice(0, 400)}`);

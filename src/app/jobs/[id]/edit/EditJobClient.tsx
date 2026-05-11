@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toast";
-import { JobForm, type JobFormInitial } from "@/components/JobForm";
+import { JobForm, type JobFormInitial, type JobFormSubmitArgs } from "@/components/JobForm";
 import { actionStartGeneration, actionUpdateJob } from "@/lib/actions";
 import { rowsToCsv } from "@/lib/anchors/csv";
 import type { Job, SettingsBlob } from "@/lib/types";
@@ -21,36 +21,74 @@ export function EditJobClient({ job, settings }: { job: Job; settings: SettingsB
     csvText: inputsToCsv(job.inputs ?? []),
   }), [job]);
 
+  // Status-aware primary action: for jobs that have generated some progress and stopped
+  // for a non-user reason (partial), or that the user explicitly stopped (paused / cancelled),
+  // the safe default is to PRESERVE existing anchors and continue from batches_done.
+  // For idle / succeeded / failed / running, "Save & rerun" remains the right default —
+  // failed has no anchors to lose, succeeded was a complete run the user is regenerating.
+  const isResumable = job.status === "partial" || job.status === "paused" || job.status === "cancelled";
+
+  const saveAndResume = {
+    label: t("editJob.saveAndResume"),
+    busyLabel: t("editJob.saveAndResumeBusy"),
+    onSubmit: async (args: JobFormSubmitArgs) => {
+      await actionUpdateJob({ id: job.id, ...args });
+      const r = await actionStartGeneration(job.id, { resume: true });
+      if (r.ok) {
+        toast(t("jobView.toasts.savedResume"), "info");
+      } else {
+        toast(r.message, "error");
+      }
+      router.push(`/jobs/${job.id}`);
+    },
+  };
+
+  const saveAndRerun = {
+    label: t("editJob.saveAndRerun"),
+    busyLabel: t("editJob.saveAndRerunBusy"),
+    onSubmit: async (args: JobFormSubmitArgs) => {
+      // Confirm before destroying existing anchors when we're switching off the
+      // resumable default. Without this, "Save & rerun" would silently discard 41 batches
+      // of work — the exact bug we just fixed by making Save & resume the new default.
+      const anchorsCount = job.anchors?.length ?? 0;
+      if (isResumable && anchorsCount > 0) {
+        const ok = window.confirm(t("editJob.rerunConfirmDestructive", { n: anchorsCount }));
+        if (!ok) return;
+      }
+      await actionUpdateJob({ id: job.id, ...args });
+      const r = await actionStartGeneration(job.id);
+      if (r.ok) {
+        toast(t("jobView.toasts.savedRerun", { n: r.batchesTotal, plural: r.batchesTotal === 1 ? "" : "es" }), "info");
+      } else {
+        toast(r.message, "error");
+      }
+      router.push(`/jobs/${job.id}`);
+    },
+  };
+
+  const saveOnly = {
+    label: t("editJob.saveOnly"),
+    busyLabel: t("editJob.saveOnlyBusy"),
+    variant: "outline" as const,
+    onSubmit: async (args: JobFormSubmitArgs) => {
+      await actionUpdateJob({ id: job.id, ...args });
+      toast(t("jobView.toasts.savedOnly"), "success");
+      router.push(`/jobs/${job.id}`);
+    },
+  };
+
   return (
     <JobForm
       settings={settings}
       initial={initial}
       heading={t("editJob.heading", { name: job.name })}
       subheading={t("editJob.sub")}
-      primaryAction={{
-        label: t("editJob.saveAndRerun"),
-        busyLabel: t("editJob.saveAndRerunBusy"),
-        onSubmit: async (args) => {
-          await actionUpdateJob({ id: job.id, ...args });
-          const r = await actionStartGeneration(job.id);
-          if (r.ok) {
-            toast(t("jobView.toasts.savedRerun", { n: r.batchesTotal, plural: r.batchesTotal === 1 ? "" : "es" }), "info");
-          } else {
-            toast(r.message, "error");
-          }
-          router.push(`/jobs/${job.id}`);
-        },
-      }}
-      secondaryAction={{
-        label: t("editJob.saveOnly"),
-        busyLabel: t("editJob.saveOnlyBusy"),
-        variant: "outline",
-        onSubmit: async (args) => {
-          await actionUpdateJob({ id: job.id, ...args });
-          toast(t("jobView.toasts.savedOnly"), "success");
-          router.push(`/jobs/${job.id}`);
-        },
-      }}
+      // Resumable jobs (partial/paused/cancelled): primary = Save & resume (safe). Save only
+      // is the secondary. "Save & rerun" is hidden — users who explicitly want to wipe and
+      // restart use the "Rerun all" button on the job page.
+      // Other jobs (idle/succeeded/failed): primary = Save & rerun (the existing default).
+      primaryAction={isResumable ? saveAndResume : saveAndRerun}
+      secondaryAction={saveOnly}
     />
   );
 }

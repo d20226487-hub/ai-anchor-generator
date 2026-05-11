@@ -9,7 +9,8 @@ import { useToast } from "@/components/ui/Toast";
 import { actionSaveSettings, actionTestProvider } from "@/lib/actions";
 import { PREDEFINED_MODELS } from "@/lib/settings";
 import { DEFAULT_GENERATION_PROMPT, DEFAULT_REGENERATION_PROMPT } from "@/lib/prompts";
-import { KEY_CLEAR_SENTINEL, type ProviderId, type SettingsBlob } from "@/lib/types";
+import { KEY_CLEAR_SENTINEL, type ProviderAdvanced, type ProviderId, type SettingsBlob } from "@/lib/types";
+import { PROVIDER_LIMIT_BOUNDS, PROVIDER_LIMIT_DEFAULTS } from "@/lib/providers/limits";
 import { Eye, EyeOff, Plus, Trash2, RotateCcw, X } from "lucide-react";
 import { useT } from "@/lib/i18n/I18nProvider";
 
@@ -182,9 +183,9 @@ function ProviderCard({
   label: string;
   helpUrl: string;
   hint?: string;
-  cfg: { apiKey: string; baseUrl?: string; apiKeyPreview?: string | null };
+  cfg: { apiKey: string; baseUrl?: string; apiKeyPreview?: string | null; advanced?: ProviderAdvanced };
   currentSettings: SettingsBlob;
-  onChange: (next: { apiKey: string; baseUrl?: string; apiKeyPreview?: string | null }) => void;
+  onChange: (next: { apiKey: string; baseUrl?: string; apiKeyPreview?: string | null; advanced?: ProviderAdvanced }) => void;
 }) {
   const [show, setShow] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
@@ -269,8 +270,135 @@ function ProviderCard({
             />
           </div>
         )}
+        <AdvancedProviderSection
+          advanced={cfg.advanced}
+          onChange={(next) => onChange({ ...cfg, advanced: next })}
+        />
       </CardBody>
     </Card>
+  );
+}
+
+/** Collapsible Advanced expander on each provider card. Three knobs: per-call timeout,
+ *  inter-batch delay, max consecutive rate-limit retries. All optional — empty input
+ *  means "use default" and the saved settings won't include the field. */
+function AdvancedProviderSection({
+  advanced,
+  onChange,
+}: {
+  advanced: ProviderAdvanced | undefined;
+  onChange: (next: ProviderAdvanced | undefined) => void;
+}) {
+  const { t } = useT();
+  const [open, setOpen] = React.useState(false);
+
+  const a = advanced ?? {};
+  // True when at least one knob differs from defaults — used to badge the toggle so the
+  // user can tell at a glance whether this provider is using custom limits.
+  const hasOverride = a.timeoutMs != null || a.interBatchDelayMs != null || a.maxRateRetries != null;
+
+  function setField<K extends keyof ProviderAdvanced>(key: K, raw: string) {
+    const next: ProviderAdvanced = { ...a };
+    if (raw === "") {
+      delete next[key];
+    } else {
+      const n = Number(raw);
+      if (Number.isFinite(n)) next[key] = n;
+    }
+    // If all three are unset, drop the whole `advanced` object entirely so saved settings
+    // stay clean.
+    const empty = next.timeoutMs == null && next.interBatchDelayMs == null && next.maxRateRetries == null;
+    onChange(empty ? undefined : next);
+  }
+
+  return (
+    <div className="border-t border-[var(--color-border)] pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-xs text-[var(--color-text-dim)] hover:text-[var(--color-text)] cursor-pointer"
+      >
+        <span>{open ? "▾" : "▸"}</span>
+        <span>{t("settings.advancedTitle")}</span>
+        {hasOverride && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)]">
+            {t("settings.advancedCustom")}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="mt-3 space-y-3">
+          <p className="text-[11px] text-[var(--color-text-faint)] leading-relaxed">
+            {t("settings.advancedHint")}
+          </p>
+          <AdvancedField
+            label={t("settings.timeoutLabel")}
+            hint={t("settings.timeoutHint", { def: PROVIDER_LIMIT_DEFAULTS.timeoutMs / 1000 })}
+            value={a.timeoutMs == null ? "" : String(a.timeoutMs / 1000)}
+            placeholder={String(PROVIDER_LIMIT_DEFAULTS.timeoutMs / 1000)}
+            min={PROVIDER_LIMIT_BOUNDS.timeoutMs.min / 1000}
+            max={PROVIDER_LIMIT_BOUNDS.timeoutMs.max / 1000}
+            unit="s"
+            onChange={(v) => setField("timeoutMs", v === "" ? "" : String(Math.round(Number(v) * 1000)))}
+          />
+          <AdvancedField
+            label={t("settings.interBatchDelayLabel")}
+            hint={t("settings.interBatchDelayHint", { def: PROVIDER_LIMIT_DEFAULTS.interBatchDelayMs })}
+            value={a.interBatchDelayMs == null ? "" : String(a.interBatchDelayMs)}
+            placeholder={String(PROVIDER_LIMIT_DEFAULTS.interBatchDelayMs)}
+            min={PROVIDER_LIMIT_BOUNDS.interBatchDelayMs.min}
+            max={PROVIDER_LIMIT_BOUNDS.interBatchDelayMs.max}
+            unit="ms"
+            onChange={(v) => setField("interBatchDelayMs", v)}
+          />
+          <AdvancedField
+            label={t("settings.maxRateRetriesLabel")}
+            hint={t("settings.maxRateRetriesHint", { def: PROVIDER_LIMIT_DEFAULTS.maxRateRetries })}
+            value={a.maxRateRetries == null ? "" : String(a.maxRateRetries)}
+            placeholder={String(PROVIDER_LIMIT_DEFAULTS.maxRateRetries)}
+            min={PROVIDER_LIMIT_BOUNDS.maxRateRetries.min}
+            max={PROVIDER_LIMIT_BOUNDS.maxRateRetries.max}
+            unit=""
+            onChange={(v) => setField("maxRateRetries", v)}
+          />
+          {hasOverride && (
+            <button
+              type="button"
+              onClick={() => onChange(undefined)}
+              className="text-[11px] text-[var(--color-text-dim)] underline hover:text-[var(--color-text)] cursor-pointer"
+            >
+              {t("settings.resetAdvanced")}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdvancedField({
+  label, hint, value, placeholder, min, max, unit, onChange,
+}: {
+  label: string; hint: string; value: string; placeholder: string;
+  min: number; max: number; unit: string; onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <Label className="text-xs">{label}</Label>
+      <div className="mt-1 flex items-center gap-2">
+        <Input
+          type="number"
+          min={min}
+          max={max}
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          className="max-w-[140px]"
+        />
+        {unit && <span className="text-xs text-[var(--color-text-dim)]">{unit}</span>}
+      </div>
+      <p className="mt-1 text-[11px] text-[var(--color-text-faint)] leading-relaxed">{hint}</p>
+    </div>
   );
 }
 

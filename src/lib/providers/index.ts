@@ -2,6 +2,7 @@ import type { ProviderId, SettingsBlob } from "../types";
 import { callOpenAICompatible } from "./openai-compat";
 import { callGemini } from "./gemini";
 import { callGitHubModels } from "./github";
+import { resolveProviderLimits } from "./limits";
 
 export interface CallArgs {
   providerId: ProviderId;
@@ -15,6 +16,10 @@ export async function callProvider(args: CallArgs): Promise<string> {
   const cfg = settings.providers[providerId];
   if (!cfg?.apiKey) throw new Error(`No API key configured for ${providerId}. Configure it in Settings.`);
 
+  // Pull the per-provider timeout from advanced settings. Other limits
+  // (interBatchDelayMs, maxRateRetries) are applied higher up in the loop, not here.
+  const { timeoutMs } = resolveProviderLimits(cfg);
+
   if (providerId === "openrouter") {
     return callOpenAICompatible({
       apiKey: cfg.apiKey,
@@ -22,6 +27,7 @@ export async function callProvider(args: CallArgs): Promise<string> {
       model: args.model,
       prompt: args.prompt,
       providerId,
+      timeoutMs,
     });
   }
   if (providerId === "github") {
@@ -30,10 +36,11 @@ export async function callProvider(args: CallArgs): Promise<string> {
       baseUrl: nonEmpty(cfg.baseUrl) || "https://models.github.ai/inference",
       model: args.model,
       prompt: args.prompt,
+      timeoutMs,
     });
   }
   if (providerId === "gemini") {
-    return callGemini({ apiKey: cfg.apiKey, model: args.model, prompt: args.prompt });
+    return callGemini({ apiKey: cfg.apiKey, model: args.model, prompt: args.prompt, timeoutMs });
   }
   throw new Error(`Unknown provider: ${providerId}`);
 }

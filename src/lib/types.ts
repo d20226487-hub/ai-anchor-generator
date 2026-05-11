@@ -99,6 +99,18 @@ export interface Job {
   anchors?: JobAnchor[];
 }
 
+export interface ProviderAdvanced {
+  /** Per-call timeout in ms. Default 60_000. Cap a hung AI response from blocking a
+   *  batch indefinitely. */
+  timeoutMs?: number;
+  /** Inter-batch delay in ms after a successful batch. Default 1500. Raise for strict
+   *  per-minute quota providers, lower for paid tiers where you want max throughput. */
+  interBatchDelayMs?: number;
+  /** Max consecutive rate-limit retries before flipping the job to partial/failed.
+   *  Default 10. Raise for patient retries on transient outages, lower to fail fast. */
+  maxRateRetries?: number;
+}
+
 export interface ProviderConfig {
   apiKey: string;
   baseUrl?: string;
@@ -107,6 +119,9 @@ export interface ProviderConfig {
   // without ever shipping the full key to the browser. NEVER persisted; never sent
   // client → server (saveSettings ignores this field).
   apiKeyPreview?: string | null;
+  /** Per-provider rate-limit / timeout knobs. All optional — undefined means "use the
+   *  default from PROVIDER_LIMIT_DEFAULTS". See src/lib/providers/limits.ts. */
+  advanced?: ProviderAdvanced;
 }
 
 /** Sentinel the Settings form sends to explicitly remove a stored API key. */
