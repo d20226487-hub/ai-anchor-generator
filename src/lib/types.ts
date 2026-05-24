@@ -62,6 +62,24 @@ export interface JobInput {
   targetUrl: string;
   title: string | null;
   keywords: string | null;
+  /** V2 only: per-row config carried alongside Target URL. NULL on V1 inputs. */
+  payloadV2?: JobInputPayloadV2 | null;
+}
+
+/**
+ * V2 input row — one entry of the V2 CSV. Each row is its own AI request:
+ * generate `numberOfLinks` anchors for `targetUrl` with the given category mix,
+ * Link Type (passed through to output), language, and geographic context.
+ */
+export interface JobInputPayloadV2 {
+  linkType: string;
+  numberOfLinks: number;
+  /** Per-row category mix. Each component is 0..100; the four must sum to 100. */
+  distribution: DistributionPct;
+  /** Free-text geo label that flows through to the output. */
+  geo: string;
+  /** Free-text language label (or ISO code). */
+  lang: string;
 }
 
 export interface JobAnchor {
@@ -74,13 +92,30 @@ export interface JobAnchor {
   anchorText: string;
   category: AnchorCategory;
   manuallyEdited: 0 | 1;
+  /** V2 only: linkType / geo / lang echoed through from the input. NULL on V1 anchors. */
+  payloadV2?: JobAnchorPayloadV2 | null;
+}
+
+export interface JobAnchorPayloadV2 {
+  linkType: string;
+  geo: string;
+  lang: string;
 }
 
 export type JobStatus = "idle" | "running" | "paused" | "succeeded" | "partial" | "failed" | "cancelled";
 
+/**
+ * V2 job version. 1 = legacy flow (dofollow ratio, job-level distribution sliders,
+ * brand list, language picker). 2 = CSV-driven flow with per-row distribution,
+ * link type, geo, and lang; no dofollow concept. Stored on `jobs.version`.
+ */
+export type JobVersion = 1 | 2;
+
 export interface Job {
   id: string;
   name: string;
+  /** Schema/UI version. Determines which form, prompts, parser, and Job View to render. */
+  version: JobVersion;
   mode: JobMode;
   criteria: JobCriteria;
   createdAt: number;
@@ -95,8 +130,57 @@ export interface Job {
   // batches; cleared on pause/cancel/start. Only one runner can hold the lease at a time.
   runnerId: string | null;
   runnerHeartbeatAt: number | null;
+  /** Containing folder. null = lives at root. */
+  folderId: string | null;
+  /** Display name of the person who created the job. null on legacy rows → renders as "Unknown". */
+  createdBy: string | null;
+  /** Soft-delete tombstone. NULL = live; ms-epoch = in trash. Excluded from default reads. */
+  deletedAt: number | null;
+  /** AI cost tracking — accumulated across batches. Locked in at write time using the
+   *  ModelPricing row that existed when each batch was written. Resets on rerun. */
+  aiInputTokens: number;
+  aiOutputTokens: number;
+  /** Subset of aiInputTokens that the provider reported as cache hits (Vertex Gemini's
+   *  `cachedContentTokenCount`). Informational only; cost math doesn't discount. */
+  aiCachedInputTokens: number;
+  aiCostUsd: number;
   inputs?: JobInput[];
   anchors?: JobAnchor[];
+}
+
+export interface ModelPricing {
+  providerId: ProviderId;
+  model: string;
+  /** USD per 1 MILLION input tokens (matches every provider's published pricing page). */
+  inputPerMillion: number;
+  /** USD per 1 MILLION output tokens. */
+  outputPerMillion: number;
+  updatedAt: number;
+}
+
+/** Token counts a provider returned for one AI call. Anything missing defaults to 0. */
+export interface ProviderUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Vertex Gemini's `usageMetadata.cachedContentTokenCount` — slice of inputTokens
+   *  served from implicit prompt cache. Other providers report 0 (no equivalent). */
+  cachedInputTokens: number;
+}
+
+export interface Folder {
+  id: string;
+  parentId: string | null;
+  name: string;
+  createdAt: number;
+  deletedAt: number | null;
+}
+
+/** Folder + counts used to render rows in the folder browser. */
+export interface FolderRow extends Folder {
+  /** Live jobs in this folder + ALL descendants (recursive). */
+  jobCount: number;
+  /** Live direct child folders. */
+  subfolderCount: number;
 }
 
 export interface ProviderAdvanced {
@@ -109,6 +193,10 @@ export interface ProviderAdvanced {
   /** Max consecutive rate-limit retries before flipping the job to partial/failed.
    *  Default 10. Raise for patient retries on transient outages, lower to fail fast. */
   maxRateRetries?: number;
+  /** V2 only — soft cap on anchors per batch. Pack rows (or split a heavy row) until the
+   *  running anchor total reaches this. Default 200. Tune to the model's output budget:
+   *  Llama 70B ~100, GPT-4o / Claude 3.5 ~200, Gemini 2.5 Pro 400+. */
+  v2BatchTargetAnchors?: number;
 }
 
 export interface ProviderConfig {
@@ -147,9 +235,18 @@ export type Theme = "dark" | "light";
 export interface SettingsBlob {
   providers: Record<ProviderId, ProviderConfig>;
   customModels: Record<ProviderId, string[]>;
+  /**
+   * Prompt templates by version. V1 keys (`generation`, `regeneration`) are kept at the
+   * top level for backward compatibility with existing stored settings; V2 lives under
+   * `v2.*`. `mergeSettings` fills V2 defaults if missing on load.
+   */
   prompts: {
     generation: string;
     regeneration: string;
+    v2: {
+      generation: string;
+      regeneration: string;
+    };
   };
   defaults: {
     providerId: ProviderId;

@@ -1,4 +1,5 @@
-import type { Brand, JobCriteria, JobInput, JobMode, JobAnchor } from "../types";
+import type { Brand, JobCriteria, JobInput, JobInputPayloadV2, JobMode, JobAnchor } from "../types";
+import type { V2BatchEntry } from "./batchPlan";
 import { matchBrand } from "./brands";
 
 /** Resolve the language for an input — multi-site looks up the matched brand, single-site
@@ -149,4 +150,84 @@ export function composeRegenerationPrompt(args: RegenArgs): string {
   return template
     .replaceAll("{{BRANDS_BLOCK}}", brandsBlock)
     .replaceAll("{{REGEN_BLOCK}}", regenBlock);
+}
+
+// =====================================================================
+// V2 compose — CSV-driven, per-row config (2026-05-24)
+// =====================================================================
+
+interface ComposeV2Args {
+  template: string;
+  /** Pre-planned entries for this batch — each carries the input row + the exact per-
+   *  category integer counts the AI should produce. Heavy rows appear in multiple
+   *  consecutive batches; each batch sees its own slice via exactCounts. */
+  entries: V2BatchEntry[];
+}
+
+export function composeGenerationPromptV2(args: ComposeV2Args): string {
+  const { template, entries } = args;
+
+  const entriesBlock = entries
+    .map((e, i) => {
+      const input = e.input;
+      const p = input.payloadV2 as JobInputPayloadV2;
+      const counts = e.exactCounts;
+      const subTotal = counts.url + counts.branded + counts.generic + counts.keyword;
+      // Brand-domain hint: hostname of target URL (with "www." stripped) — the prompt asks
+      // the AI to derive brand-style anchors from this. Keeps the AI from inventing brands
+      // unrelated to the actual host.
+      let hostHint = "";
+      try {
+        const u = new URL(input.targetUrl);
+        hostHint = u.hostname.replace(/^www\./i, "");
+      } catch {
+        // Not a valid URL — fall back to a best-effort substring before the first "/".
+        hostHint = input.targetUrl.replace(/^https?:\/\//i, "").split("/")[0].replace(/^www\./i, "");
+      }
+      const lines = [
+        `${i + 1}. id: ${input.id}`,
+        `   targetUrl: ${input.targetUrl}`,
+        `   hostnameForBrand: ${hostHint}`,
+        `   linkType: ${p.linkType}`,
+        // Show the sub-batch's own total so the AI knows EXACTLY how many anchors to emit
+        // for THIS entry within THIS batch. The full row total (which may span multiple
+        // batches) is intentionally NOT shown — it would confuse the AI when sub-batches
+        // are involved.
+        `   produceExactly: ${subTotal}`,
+        `   exactCounts: { url: ${counts.url}, brand: ${counts.branded}, generic: ${counts.generic}, keyword: ${counts.keyword} }  ← produce EXACTLY these per category`,
+        `   geo: ${p.geo || "(none)"}`,
+        `   lang: ${p.lang || "(none)"}`,
+      ];
+      return lines.join("\n");
+    })
+    .join("\n");
+
+  return template.replaceAll("{{ENTRIES_BLOCK_V2}}", entriesBlock);
+}
+
+interface RegenV2Args {
+  template: string;
+  /** Anchors to regenerate, must include V2 payload so the prompt can echo through. */
+  anchors: Array<Pick<JobAnchor, "id" | "targetUrl" | "category" | "anchorText"> & { payloadV2: { linkType: string; geo: string; lang: string } }>;
+}
+
+export function composeRegenerationPromptV2(args: RegenV2Args): string {
+  const { template, anchors } = args;
+  const regenBlock = anchors
+    .map((a) => {
+      let hostHint = "";
+      try { hostHint = new URL(a.targetUrl).hostname.replace(/^www\./i, ""); } catch { /* keep empty */ }
+      return [
+        `- id: ${a.id}`,
+        `  targetUrl: ${a.targetUrl}`,
+        `  hostnameForBrand: ${hostHint}`,
+        `  category: ${a.category}`,
+        `  linkType: ${a.payloadV2.linkType}`,
+        `  geo: ${a.payloadV2.geo}`,
+        `  lang: ${a.payloadV2.lang}`,
+        `  current: ${a.anchorText}`,
+      ].join("\n");
+    })
+    .join("\n");
+  return template.replaceAll("{{REGEN_BLOCK_V2}}", regenBlock);
 }

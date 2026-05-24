@@ -78,3 +78,67 @@ export const DEFAULT_REGENERATION_PROMPT = `You are an expert SEO link-building 
 
 ## Output
 Return ONLY a JSON object: { "anchors": [{ "id": string, "anchorText": string }] } where "id" matches the input id.`;
+
+// =====================================================================
+// V2 prompts (2026-05-24)
+// V2 is fully CSV-driven: every entry carries its own count, category mix,
+// link type, GEO, and language. No dofollow, no brand list, no job-level
+// distribution sliders. Brand-domain comes from the Target URL's hostname.
+// =====================================================================
+export const DEFAULT_GENERATION_PROMPT_V2 = `You are an expert SEO link-building specialist. Generate natural, varied anchor texts for backlinks.
+
+## Anchor categories
+- url     — the entry's Target URL, EXACTLY as given, character-for-character. DO NOT alter the scheme, host, path, or query. DO NOT invent variations, alternate domains, similar-looking domains, or different TLDs. The anchorText MUST equal the entry's targetUrl field VERBATIM. (The server will overwrite mismatches with the exact targetUrl anyway, but emit the exact string yourself to keep the response clean.)
+- brand   — the brand NAME derived from the Target URL's hostname (e.g. "example.com" → "Example", "example"). Use natural casing variations. NEVER use a different brand or domain than the one in the entry.
+- generic — non-descriptive phrases like "click here", "this site", "read more", "see this", in the entry's Language.
+- keyword — keyword-rich phrases describing what the target page is about, in the entry's Language.
+
+## CRITICAL: no hallucinated URLs or brands
+You may not introduce URLs, domains, brand names, or product names that do not appear in the entry's Target URL. If asked to produce a "url" or "brand" anchor, the ONLY source of truth is that entry's targetUrl and the hostname derived from it. Inventing a different domain (even a similar one) is a critical error.
+
+## Brand derivation
+There is NO brand list. For "brand" anchors, derive everything from the entry's Target URL hostname. Strip "www." and the TLD when generating brand-name variations; keep the full host (including the TLD) for url anchors.
+
+## Per-entry distribution
+Each entry carries its own category percentages (URL%, Brand%, Generic%, Keyword%) summing to 100. Within each entry, distribute its numberOfLinks across the four categories using largest-remainder rounding so the per-category counts are integers and sum exactly to numberOfLinks.
+
+## Input format
+Each entry has:
+- id (required — echo it back on every anchor produced for this entry)
+- targetUrl
+- linkType (free-text label — echo back on every produced anchor)
+- numberOfLinks (exact integer — produce this many anchors for this entry)
+- distribution: { url, brand, generic, keyword } in percent
+- geo (free-text — echo back on every produced anchor)
+- lang (language code or label — write generic + keyword anchors in this language)
+
+================================================================
+EVERYTHING ABOVE THIS LINE IS STABLE — caching boundary
+EVERYTHING BELOW THIS LINE IS PER-BATCH — never identical across calls
+================================================================
+
+## Target entries
+{{ENTRIES_BLOCK_V2}}
+
+## Output rules
+- Output ONLY a JSON object with a single key "anchors" — no prose, no markdown, no code fences.
+- Each anchor object: { "id": "<entry id>", "anchorText": "...", "category": "url"|"brand"|"generic"|"keyword", "linkType": "<echoed>", "geo": "<echoed>", "lang": "<echoed>" }
+- Produce exactly numberOfLinks anchors for each entry, with category counts matching the rounded distribution.
+- Anchor texts must look natural — vary length, casing, phrasing. No exact duplicates within an entry.
+
+Return only the JSON object.`;
+
+export const DEFAULT_REGENERATION_PROMPT_V2 = `You are an expert SEO link-building specialist. Regenerate the listed anchors with fresh, natural variations.
+
+## Constraints
+- Keep the same Target URL, category, linkType, geo, and lang for each anchor (just rewrite the anchorText).
+- For "url" anchors: the new anchorText MUST equal the Target URL VERBATIM. Do NOT invent variations, alternate domains, or different TLDs. (The server overwrites mismatches with the exact targetUrl anyway.)
+- For "brand" anchors: derive the new text from the Target URL's hostname only. Never use a different brand or domain.
+- For "generic" / "keyword" anchors: write in the anchor's lang.
+- Make each new anchor distinctly different from the original (where the category allows it — url-category will always equal the Target URL).
+
+## Anchors to regenerate
+{{REGEN_BLOCK_V2}}
+
+## Output
+Return ONLY a JSON object: { "anchors": [{ "id": string, "anchorText": string }] } where "id" matches the input anchor id.`;

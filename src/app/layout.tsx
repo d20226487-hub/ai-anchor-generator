@@ -3,6 +3,7 @@ import "./globals.css";
 import { Nav } from "@/components/Nav";
 import { ToastProvider } from "@/components/ui/Toast";
 import { I18nProvider } from "@/lib/i18n/I18nProvider";
+import { DisplayNameProvider } from "@/components/DisplayNameProvider";
 import { loadSettings } from "@/lib/settings";
 
 export const metadata: Metadata = {
@@ -18,10 +19,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html lang={locale} data-theme={theme} className="h-full">
       <body className="min-h-full">
         <I18nProvider locale={locale}>
-          <ToastProvider>
-            <Nav locale={locale} theme={theme} />
-            <main className="max-w-7xl mx-auto px-6 py-8">{children}</main>
-          </ToastProvider>
+          <DisplayNameProvider>
+            <ToastProvider>
+              <Nav locale={locale} theme={theme} />
+              <main className="max-w-7xl mx-auto px-6 py-8">{children}</main>
+            </ToastProvider>
+          </DisplayNameProvider>
         </I18nProvider>
       </body>
     </html>

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import type { ProviderUsage } from "../types";
 
 interface Args {
   apiKey: string;
@@ -10,7 +11,25 @@ interface Args {
   timeoutMs: number;
 }
 
-export async function callOpenAICompatible(args: Args): Promise<string> {
+export interface CallResult {
+  text: string;
+  usage: ProviderUsage;
+}
+
+const ZERO_USAGE: ProviderUsage = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 };
+
+function usageFromOpenAI(u: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } | undefined): ProviderUsage {
+  if (!u) return ZERO_USAGE;
+  return {
+    inputTokens: Number(u.prompt_tokens ?? 0),
+    outputTokens: Number(u.completion_tokens ?? 0),
+    // OpenAI / OpenRouter sometimes return a cached-tokens breakdown for the new
+    // "auto prompt caching" feature. Capture it if present.
+    cachedInputTokens: Number(u.prompt_tokens_details?.cached_tokens ?? 0),
+  };
+}
+
+export async function callOpenAICompatible(args: Args): Promise<CallResult> {
   const { apiKey, baseUrl, model, prompt, providerId, timeoutMs } = args;
   const label = "OpenRouter";
 
@@ -34,7 +53,7 @@ export async function callOpenAICompatible(args: Args): Promise<string> {
         response_format: { type: "json_object" },
         temperature: 0.8,
       });
-      return r.choices[0]?.message?.content ?? "";
+      return { text: r.choices[0]?.message?.content ?? "", usage: usageFromOpenAI(r.usage) };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/response_format|json_object/i.test(msg)) {
@@ -43,7 +62,7 @@ export async function callOpenAICompatible(args: Args): Promise<string> {
           messages: [{ role: "user", content: prompt }],
           temperature: 0.8,
         });
-        return r.choices[0]?.message?.content ?? "";
+        return { text: r.choices[0]?.message?.content ?? "", usage: usageFromOpenAI(r.usage) };
       }
       throw e;
     }

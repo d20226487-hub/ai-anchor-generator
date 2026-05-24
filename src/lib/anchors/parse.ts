@@ -82,3 +82,44 @@ export function parseRegenResponse(raw: string): ParsedRegen[] {
   }
   return out;
 }
+
+// =====================================================================
+// V2 parser — same JSON envelope, extra fields per anchor (2026-05-24)
+// =====================================================================
+
+const MAX_PASSTHROUGH_LEN = 100; // linkType / geo / lang are display strings — cap to keep DB tidy.
+
+export interface ParsedAnchorV2 {
+  id: string;
+  anchorText: string;
+  category: AnchorCategory;
+  linkType: string;
+  geo: string;
+  lang: string;
+}
+
+/**
+ * Parse the V2 AI response. Same envelope `{ anchors: [...] }` as V1; each anchor adds
+ * linkType/geo/lang echoed from the input. Category normalizes both "brand" (the prompt
+ * label) and "branded" (the internal enum value) to "branded".
+ */
+export function parseAnchorsResponseV2(raw: string): ParsedAnchorV2[] {
+  const obj = extractJsonObject(raw) as { anchors?: unknown };
+  const arr = Array.isArray(obj.anchors) ? obj.anchors.slice(0, MAX_ANCHORS_PER_RESPONSE) : [];
+  const out: ParsedAnchorV2[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const i = item as Record<string, unknown>;
+    const id = typeof i.id === "string" ? i.id.trim().slice(0, MAX_ID_LEN) : "";
+    const anchorText = typeof i.anchorText === "string" ? i.anchorText.trim().slice(0, MAX_ANCHOR_TEXT_LEN) : "";
+    if (!id || !anchorText) continue;
+    let catRaw = typeof i.category === "string" ? i.category.toLowerCase().trim() : "";
+    if (catRaw === "brand") catRaw = "branded"; // V2 prompt label → internal enum
+    const category = (CATS as string[]).includes(catRaw) ? (catRaw as AnchorCategory) : "generic";
+    const linkType = typeof i.linkType === "string" ? i.linkType.trim().slice(0, MAX_PASSTHROUGH_LEN) : "";
+    const geo = typeof i.geo === "string" ? i.geo.trim().slice(0, MAX_PASSTHROUGH_LEN) : "";
+    const lang = typeof i.lang === "string" ? i.lang.trim().slice(0, MAX_PASSTHROUGH_LEN) : "";
+    out.push({ id, anchorText, category, linkType, geo, lang });
+  }
+  return out;
+}

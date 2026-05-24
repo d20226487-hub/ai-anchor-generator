@@ -1,5 +1,10 @@
 import { db } from "./db";
-import { DEFAULT_GENERATION_PROMPT, DEFAULT_REGENERATION_PROMPT } from "./prompts";
+import {
+  DEFAULT_GENERATION_PROMPT,
+  DEFAULT_GENERATION_PROMPT_V2,
+  DEFAULT_REGENERATION_PROMPT,
+  DEFAULT_REGENERATION_PROMPT_V2,
+} from "./prompts";
 import { KEY_CLEAR_SENTINEL, type ProviderConfig, type ProviderId, type SettingsBlob } from "./types";
 
 export const DEFAULT_SETTINGS: SettingsBlob = {
@@ -18,6 +23,10 @@ export const DEFAULT_SETTINGS: SettingsBlob = {
   prompts: {
     generation: DEFAULT_GENERATION_PROMPT,
     regeneration: DEFAULT_REGENERATION_PROMPT,
+    v2: {
+      generation: DEFAULT_GENERATION_PROMPT_V2,
+      regeneration: DEFAULT_REGENERATION_PROMPT_V2,
+    },
   },
   defaults: {
     providerId: "openrouter",
@@ -180,10 +189,20 @@ function mergeSettings(p: Partial<SettingsBlob>): SettingsBlob {
   const modelByProvider: Record<string, string> = { ...DEFAULT_SETTINGS.defaults.modelByProvider, ...(rawDefaults.modelByProvider ?? {}) };
   if (rawDefaults.model && !rawDefaults.modelByProvider) modelByProvider[providerId] = rawDefaults.model;
 
+  // V2 prompts (2026-05-24) — fill defaults on any stored blob that predates V2.
+  const promptsIn = (p.prompts ?? {}) as Partial<SettingsBlob["prompts"]>;
+  const v2In = (promptsIn.v2 ?? {}) as Partial<SettingsBlob["prompts"]["v2"]>;
   return {
     providers: { ...DEFAULT_SETTINGS.providers, ...(p.providers ?? {}) } as SettingsBlob["providers"],
     customModels: { ...DEFAULT_SETTINGS.customModels, ...(p.customModels ?? {}) } as SettingsBlob["customModels"],
-    prompts: { ...DEFAULT_SETTINGS.prompts, ...(p.prompts ?? {}) },
+    prompts: {
+      generation: promptsIn.generation ?? DEFAULT_SETTINGS.prompts.generation,
+      regeneration: promptsIn.regeneration ?? DEFAULT_SETTINGS.prompts.regeneration,
+      v2: {
+        generation: v2In.generation ?? DEFAULT_SETTINGS.prompts.v2.generation,
+        regeneration: v2In.regeneration ?? DEFAULT_SETTINGS.prompts.v2.regeneration,
+      },
+    },
     defaults: { providerId, modelByProvider: modelByProvider as SettingsBlob["defaults"]["modelByProvider"] },
     locale: p.locale === "ru" ? "ru" : "en",
     theme: p.theme === "light" ? "light" : "dark",

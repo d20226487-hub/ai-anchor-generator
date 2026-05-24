@@ -8,7 +8,13 @@ import { Input, Label, Select, Textarea } from "@/components/ui/Input";
 import { useToast } from "@/components/ui/Toast";
 import { actionSaveSettings, actionTestProvider } from "@/lib/actions";
 import { PREDEFINED_MODELS } from "@/lib/settings";
-import { DEFAULT_GENERATION_PROMPT, DEFAULT_REGENERATION_PROMPT } from "@/lib/prompts";
+import {
+  DEFAULT_GENERATION_PROMPT,
+  DEFAULT_GENERATION_PROMPT_V2,
+  DEFAULT_REGENERATION_PROMPT,
+  DEFAULT_REGENERATION_PROMPT_V2,
+} from "@/lib/prompts";
+import { PricingTab } from "./PricingTab";
 import { KEY_CLEAR_SENTINEL, type ProviderAdvanced, type ProviderId, type SettingsBlob } from "@/lib/types";
 import { PROVIDER_LIMIT_BOUNDS, PROVIDER_LIMIT_DEFAULTS } from "@/lib/providers/limits";
 import { Eye, EyeOff, Plus, Trash2, RotateCcw, X } from "lucide-react";
@@ -53,6 +59,7 @@ export function SettingsClient({ initial }: { initial: SettingsBlob }) {
           <TabsTrigger value="providers">{t("settings.tabs.providers")}</TabsTrigger>
           <TabsTrigger value="models">{t("settings.tabs.models")}</TabsTrigger>
           <TabsTrigger value="prompts">{t("settings.tabs.prompts")}</TabsTrigger>
+          <TabsTrigger value="pricing">{t("settings.tabs.pricing")}</TabsTrigger>
           <TabsTrigger value="defaults">{t("settings.tabs.defaults")}</TabsTrigger>
         </TabsList>
 
@@ -83,26 +90,58 @@ export function SettingsClient({ initial }: { initial: SettingsBlob }) {
           ))}
         </TabsContent>
 
-        <TabsContent value="prompts" className="mt-6 space-y-4">
+        <TabsContent value="prompts" className="mt-6 space-y-6">
           <Card>
             <CardBody className="text-xs text-[var(--color-text-dim)] py-3">
               {t("settings.promptsDesc")}
             </CardBody>
           </Card>
-          <PromptCard
-            title={t("settings.promptGeneration")}
-            description="Sent when generating anchors for a new job. Uses placeholders like {{ENTRIES_BLOCK}}, {{RATIO_BLOCK}} which are filled in automatically."
-            value={s.prompts.generation}
-            onChange={(v) => setS({ ...s, prompts: { ...s.prompts, generation: v } })}
-            defaultValue={DEFAULT_GENERATION_PROMPT}
-          />
-          <PromptCard
-            title={t("settings.promptRegeneration")}
-            description="Sent when regenerating selected anchors inside a job."
-            value={s.prompts.regeneration}
-            onChange={(v) => setS({ ...s, prompts: { ...s.prompts, regeneration: v } })}
-            defaultValue={DEFAULT_REGENERATION_PROMPT}
-          />
+
+          <div className="space-y-3">
+            <div className="flex items-baseline gap-2">
+              <h3 className="text-sm font-semibold uppercase tracking-wider">{t("settings.promptsV1Heading")}</h3>
+              <span className="text-xs text-[var(--color-text-dim)]">{t("settings.promptsV1Desc")}</span>
+            </div>
+            <PromptCard
+              title={t("settings.promptGeneration")}
+              description="Sent when generating anchors for a new V1 job. Uses placeholders like {{ENTRIES_BLOCK}}, {{RATIO_BLOCK}} which are filled in automatically."
+              value={s.prompts.generation}
+              onChange={(v) => setS({ ...s, prompts: { ...s.prompts, generation: v } })}
+              defaultValue={DEFAULT_GENERATION_PROMPT}
+            />
+            <PromptCard
+              title={t("settings.promptRegeneration")}
+              description="Sent when regenerating selected V1 anchors inside a job."
+              value={s.prompts.regeneration}
+              onChange={(v) => setS({ ...s, prompts: { ...s.prompts, regeneration: v } })}
+              defaultValue={DEFAULT_REGENERATION_PROMPT}
+            />
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-baseline gap-2">
+              <h3 className="text-sm font-semibold uppercase tracking-wider">{t("settings.promptsV2Heading")}</h3>
+              <span className="text-xs text-[var(--color-text-dim)]">{t("settings.promptsV2Desc")}</span>
+            </div>
+            <PromptCard
+              title={t("settings.promptGeneration")}
+              description="V2 generation prompt — receives ENTRIES_BLOCK_V2 (per-row counts + distribution + linkType + geo + lang)."
+              value={s.prompts.v2.generation}
+              onChange={(v) => setS({ ...s, prompts: { ...s.prompts, v2: { ...s.prompts.v2, generation: v } } })}
+              defaultValue={DEFAULT_GENERATION_PROMPT_V2}
+            />
+            <PromptCard
+              title={t("settings.promptRegeneration")}
+              description="V2 regeneration prompt — receives REGEN_BLOCK_V2 (per-anchor category + linkType + geo + lang + current text)."
+              value={s.prompts.v2.regeneration}
+              onChange={(v) => setS({ ...s, prompts: { ...s.prompts, v2: { ...s.prompts.v2, regeneration: v } } })}
+              defaultValue={DEFAULT_REGENERATION_PROMPT_V2}
+            />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="pricing" className="mt-6 space-y-4">
+          <PricingTab />
         </TabsContent>
 
         <TabsContent value="defaults" className="mt-6 space-y-4">
@@ -398,7 +437,7 @@ function AdvancedProviderSection({
   const a = advanced ?? {};
   // True when at least one knob differs from defaults — used to badge the toggle so the
   // user can tell at a glance whether this provider is using custom limits.
-  const hasOverride = a.timeoutMs != null || a.interBatchDelayMs != null || a.maxRateRetries != null;
+  const hasOverride = a.timeoutMs != null || a.interBatchDelayMs != null || a.maxRateRetries != null || a.v2BatchTargetAnchors != null;
 
   function setField<K extends keyof ProviderAdvanced>(key: K, raw: string) {
     const next: ProviderAdvanced = { ...a };
@@ -408,9 +447,9 @@ function AdvancedProviderSection({
       const n = Number(raw);
       if (Number.isFinite(n)) next[key] = n;
     }
-    // If all three are unset, drop the whole `advanced` object entirely so saved settings
+    // If every knob is unset, drop the whole `advanced` object entirely so saved settings
     // stay clean.
-    const empty = next.timeoutMs == null && next.interBatchDelayMs == null && next.maxRateRetries == null;
+    const empty = next.timeoutMs == null && next.interBatchDelayMs == null && next.maxRateRetries == null && next.v2BatchTargetAnchors == null;
     onChange(empty ? undefined : next);
   }
 
@@ -463,6 +502,16 @@ function AdvancedProviderSection({
             max={PROVIDER_LIMIT_BOUNDS.maxRateRetries.max}
             unit=""
             onChange={(v) => setField("maxRateRetries", v)}
+          />
+          <AdvancedField
+            label={t("settings.v2BatchTargetAnchorsLabel")}
+            hint={t("settings.v2BatchTargetAnchorsHint", { def: PROVIDER_LIMIT_DEFAULTS.v2BatchTargetAnchors })}
+            value={a.v2BatchTargetAnchors == null ? "" : String(a.v2BatchTargetAnchors)}
+            placeholder={String(PROVIDER_LIMIT_DEFAULTS.v2BatchTargetAnchors)}
+            min={PROVIDER_LIMIT_BOUNDS.v2BatchTargetAnchors.min}
+            max={PROVIDER_LIMIT_BOUNDS.v2BatchTargetAnchors.max}
+            unit=""
+            onChange={(v) => setField("v2BatchTargetAnchors", v)}
           />
           {hasOverride && (
             <button

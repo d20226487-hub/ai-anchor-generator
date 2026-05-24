@@ -1,10 +1,11 @@
 "use client";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
-import { Anchor, BookOpen, Home, Moon, Plus, Settings, Sun } from "lucide-react";
+import { Anchor, BookOpen, Home, Moon, Plus, Settings, Sun, Trash2, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/I18nProvider";
 import { actionSetLocale, actionSetTheme } from "@/lib/actions";
+import { useDisplayName } from "@/components/DisplayNameProvider";
 import type { Locale, Theme } from "@/lib/types";
 import * as React from "react";
 
@@ -12,12 +13,14 @@ export function Nav({ locale, theme }: { locale: Locale; theme: Theme }) {
   const pathname = usePathname();
   const router = useRouter();
   const { t } = useT();
+  const { name: displayName, ready: displayNameReady, openEditor: openDisplayNameEditor } = useDisplayName();
   const [pending, setPending] = React.useState(false);
   const [themePending, setThemePending] = React.useState(false);
 
   const links = [
     { href: "/", label: t("nav.home"), icon: Home },
     { href: "/jobs/new", label: t("nav.newJob"), icon: Plus },
+    { href: "/trash", label: t("nav.trash"), icon: Trash2 },
     { href: "/docs", label: t("nav.docs"), icon: BookOpen },
     { href: "/settings", label: t("nav.settings"), icon: Settings },
   ];
@@ -67,6 +70,17 @@ export function Nav({ locale, theme }: { locale: Locale; theme: Theme }) {
               );
             })}
           </nav>
+          <button
+            type="button"
+            onClick={openDisplayNameEditor}
+            title={displayName ? t("displayName.headerTitleSet", { name: displayName }) : t("displayName.headerTitleEmpty")}
+            className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-dim)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-2)] transition-colors text-xs max-w-[160px]"
+          >
+            <User className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">
+              {displayNameReady && displayName ? displayName : t("displayName.headerEmpty")}
+            </span>
+          </button>
           <button
             type="button"
             onClick={toggleTheme}

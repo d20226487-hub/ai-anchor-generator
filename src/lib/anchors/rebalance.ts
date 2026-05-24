@@ -1,4 +1,4 @@
-import type { AnchorCategory, FollowStatus, JobAnchor, JobCriteria } from "../types";
+import type { AnchorCategory, FollowStatus, JobAnchor, JobCriteria, JobInput, JobInputPayloadV2 } from "../types";
 
 export type RebalanceMode = "replace_ai" | "surgical";
 
@@ -193,4 +193,109 @@ function smallestRatio(have: Record<AnchorCategory, number>, target: Record<Anch
     }
   }
   return best;
+}
+
+// =====================================================================
+// V2 rebalance (2026-05-24)
+// Unit: one (Target URL, Link Type) row from the V2 input set. The target
+// per category = sum of (distribution × numberOfLinks) across all inputs
+// sharing that (URL, Type) key. Manually-edited anchors are preserved.
+// =====================================================================
+
+export interface RebalancePlanV2 {
+  deleteIds: string[];
+  /** Per-category integer counts the AI should produce to fill the deficit. */
+  generate: {
+    total: number;
+    perCategory: Record<AnchorCategory, number>;
+  };
+  warnings: string[];
+}
+
+export function planRebalanceV2(args: {
+  /** All anchors for this (url, linkType) group. */
+  rowAnchors: JobAnchor[];
+  /** All input rows for this (url, linkType) group. */
+  rowInputs: Array<Pick<JobInput, "id"> & { payloadV2: JobInputPayloadV2 }>;
+  mode: RebalanceMode;
+}): RebalancePlanV2 {
+  const { rowAnchors, rowInputs, mode } = args;
+  const warnings: string[] = [];
+
+  // Total target anchors = sum of numberOfLinks across the row's inputs.
+  const totalTarget = rowInputs.reduce((a, i) => a + i.payloadV2.numberOfLinks, 0);
+  if (totalTarget === 0) {
+    return {
+      deleteIds: [],
+      generate: { total: 0, perCategory: { generic: 0, branded: 0, keyword: 0, url: 0 } },
+      warnings: ["Row has no input — target count is 0."],
+    };
+  }
+
+  // Target per category — weighted-average distribution × numberOfLinks, then Hamilton
+  // rounded so the four ints sum to totalTarget.
+  const tw: Record<AnchorCategory, number> = { generic: 0, branded: 0, keyword: 0, url: 0 };
+  for (const i of rowInputs) {
+    const p = i.payloadV2;
+    tw.generic += (p.distribution.generic ?? 0) * p.numberOfLinks;
+    tw.branded += (p.distribution.branded ?? 0) * p.numberOfLinks;
+    tw.keyword += (p.distribution.keyword ?? 0) * p.numberOfLinks;
+    tw.url += (p.distribution.url ?? 0) * p.numberOfLinks;
+  }
+  const weightSum = tw.generic + tw.branded + tw.keyword + tw.url || 1;
+  const pct: Record<AnchorCategory, number> = {
+    generic: (tw.generic / weightSum) * 100,
+    branded: (tw.branded / weightSum) * 100,
+    keyword: (tw.keyword / weightSum) * 100,
+    url: (tw.url / weightSum) * 100,
+  };
+  const targets = computeIntegerTargets(totalTarget, pct);
+
+  const manual = rowAnchors.filter((a) => a.manuallyEdited === 1);
+  const ai = rowAnchors.filter((a) => a.manuallyEdited === 0);
+  const manualPerCat: Record<AnchorCategory, number> = countBy(manual, (a) => a.category);
+
+  // Warn if manual edits already exceed the target for a category — we won't touch them.
+  for (const c of CATS) {
+    if (manualPerCat[c] > targets[c]) {
+      warnings.push(
+        `${manualPerCat[c]} manually-edited "${c}" anchors already exceed the target of ${targets[c]} for this row.`
+      );
+    }
+  }
+
+  let deleteIds: string[] = [];
+  const newPerCat: Record<AnchorCategory, number> = { generic: 0, branded: 0, keyword: 0, url: 0 };
+
+  if (mode === "replace_ai") {
+    // Wipe every AI anchor; produce enough to refill to target (minus what manual covers).
+    deleteIds = ai.map((a) => a.id);
+    for (const c of CATS) {
+      newPerCat[c] = Math.max(0, targets[c] - manualPerCat[c]);
+    }
+  } else {
+    // surgical: trim AI surplus per category, fill AI deficit per category.
+    const aiPerCat: Record<AnchorCategory, JobAnchor[]> = {
+      generic: ai.filter((a) => a.category === "generic"),
+      branded: ai.filter((a) => a.category === "branded"),
+      keyword: ai.filter((a) => a.category === "keyword"),
+      url: ai.filter((a) => a.category === "url"),
+    };
+    for (const c of CATS) {
+      const need = Math.max(0, targets[c] - manualPerCat[c]);
+      const haveAI = aiPerCat[c].length;
+      if (haveAI > need) {
+        deleteIds.push(...aiPerCat[c].slice(0, haveAI - need).map((a) => a.id));
+      } else if (haveAI < need) {
+        newPerCat[c] = need - haveAI;
+      }
+    }
+  }
+
+  const generateTotal = newPerCat.generic + newPerCat.branded + newPerCat.keyword + newPerCat.url;
+  return {
+    deleteIds,
+    generate: { total: generateTotal, perCategory: newPerCat },
+    warnings,
+  };
 }

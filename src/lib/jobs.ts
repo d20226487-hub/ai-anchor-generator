@@ -1,6 +1,9 @@
 import { db } from "./db";
 import { normalizeDistribution } from "./types";
-import type { Job, JobAnchor, JobCriteria, JobInput, JobMode, JobStatus } from "./types";
+import type {
+  Folder, FolderRow, Job, JobAnchor, JobAnchorPayloadV2, JobCriteria, JobInput,
+  JobInputPayloadV2, JobMode, JobStatus, JobVersion, ModelPricing, ProviderId,
+} from "./types";
 import { uid } from "./utils";
 
 function rowToJob(r: Record<string, unknown>): Job {
@@ -13,9 +16,12 @@ function rowToJob(r: Record<string, unknown>): Job {
   for (const b of criteria.brands ?? []) {
     if (!("language" in b) || b.language === undefined) b.language = null;
   }
+  // Version: SQLite returns the new column as 1 (default) for legacy rows.
+  const version = (r.version == null ? 1 : Number(r.version)) as JobVersion;
   return {
     id: String(r.id),
     name: String(r.name),
+    version,
     mode: String(r.mode) as JobMode,
     criteria,
     createdAt: Number(r.created_at),
@@ -28,7 +34,30 @@ function rowToJob(r: Record<string, unknown>): Job {
     runStartedAt: r.run_started_at == null ? null : Number(r.run_started_at),
     runnerId: r.runner_id == null ? null : String(r.runner_id),
     runnerHeartbeatAt: r.runner_heartbeat_at == null ? null : Number(r.runner_heartbeat_at),
+    folderId: r.folder_id == null ? null : String(r.folder_id),
+    createdBy: r.created_by == null ? null : String(r.created_by),
+    deletedAt: r.deleted_at == null ? null : Number(r.deleted_at),
+    aiInputTokens: r.ai_input_tokens == null ? 0 : Number(r.ai_input_tokens),
+    aiOutputTokens: r.ai_output_tokens == null ? 0 : Number(r.ai_output_tokens),
+    aiCachedInputTokens: r.ai_cached_input_tokens == null ? 0 : Number(r.ai_cached_input_tokens),
+    aiCostUsd: r.ai_cost_usd == null ? 0 : Number(r.ai_cost_usd),
   };
+}
+
+function rowToFolder(r: Record<string, unknown>): Folder {
+  return {
+    id: String(r.id),
+    parentId: r.parent_id == null ? null : String(r.parent_id),
+    name: String(r.name),
+    createdAt: Number(r.created_at),
+    // Folders intentionally have no creator attribution — only jobs are stamped.
+    // The created_by column may still exist on legacy DBs; it's ignored.
+    deletedAt: r.deleted_at == null ? null : Number(r.deleted_at),
+  };
+}
+function parseJsonPayload<T>(raw: unknown): T | null {
+  if (raw == null) return null;
+  try { return JSON.parse(String(raw)) as T; } catch { return null; }
 }
 function rowToInput(r: Record<string, unknown>): JobInput {
   return {
@@ -37,6 +66,7 @@ function rowToInput(r: Record<string, unknown>): JobInput {
     targetUrl: String(r.target_url),
     title: r.title == null ? null : String(r.title),
     keywords: r.keywords == null ? null : String(r.keywords),
+    payloadV2: parseJsonPayload<JobInputPayloadV2>(r.payload),
   };
 }
 function rowToAnchor(r: Record<string, unknown>): JobAnchor {
@@ -50,6 +80,7 @@ function rowToAnchor(r: Record<string, unknown>): JobAnchor {
     anchorText: String(r.anchor_text),
     category: String(r.category) as JobAnchor["category"],
     manuallyEdited: (Number(r.manually_edited) ? 1 : 0) as 0 | 1,
+    payloadV2: parseJsonPayload<JobAnchorPayloadV2>(r.payload),
   };
 }
 
@@ -69,7 +100,8 @@ const STUCK_RUNNING_GRACE_MS = 5 * 60_000;
 async function reconcileStuckRunningJobs(): Promise<void> {
   const c = await db();
   const cutoff = Date.now() - STUCK_RUNNING_GRACE_MS;
-  // Stuck + has anchors → partial
+  // Stuck + has anchors → partial. Skip soft-deleted rows (they're in the trash and
+  // don't need to be reclassified; their `runner_*` are already cleared at delete time).
   await c.execute({
     sql: `UPDATE jobs
             SET status = 'partial',
@@ -78,6 +110,7 @@ async function reconcileStuckRunningJobs(): Promise<void> {
                 runner_heartbeat_at = NULL,
                 updated_at = ?
           WHERE status = 'running'
+            AND deleted_at IS NULL
             AND (runner_heartbeat_at IS NULL OR runner_heartbeat_at < ?)
             AND updated_at < ?
             AND id IN (SELECT job_id FROM job_anchors GROUP BY job_id)`,
@@ -92,6 +125,7 @@ async function reconcileStuckRunningJobs(): Promise<void> {
                 runner_heartbeat_at = NULL,
                 updated_at = ?
           WHERE status = 'running'
+            AND deleted_at IS NULL
             AND (runner_heartbeat_at IS NULL OR runner_heartbeat_at < ?)
             AND updated_at < ?
             AND id NOT IN (SELECT job_id FROM job_anchors GROUP BY job_id)`,
@@ -99,16 +133,43 @@ async function reconcileStuckRunningJobs(): Promise<void> {
   });
 }
 
-export async function listJobs(): Promise<Job[]> {
+/**
+ * List jobs in a folder (direct children only — never recursive). Matches the way
+ * real file managers work: each folder shows its direct contents, subfolders are
+ * shown as separate rows and you click in to see what's inside.
+ *
+ *   - Pass `folderId: null` (the default) to list jobs at root (folder_id IS NULL).
+ *   - Pass `folderId: <id>` to list jobs directly inside that folder.
+ *   - Pass `includeDeleted: true` ONLY for the Trash view.
+ */
+export async function listJobs(opts: {
+  folderId?: string | null;
+  includeDeleted?: boolean;
+} = {}): Promise<Job[]> {
   const c = await db();
   await reconcileStuckRunningJobs();
-  const r = await c.execute("SELECT * FROM jobs ORDER BY updated_at DESC");
+
+  const where: string[] = [];
+  const args: (string | number | null)[] = [];
+
+  if (!opts.includeDeleted) where.push("deleted_at IS NULL");
+
+  const folderId = opts.folderId ?? null;
+  if (folderId === null) where.push("folder_id IS NULL");
+  else { where.push("folder_id = ?"); args.push(folderId); }
+
+  const sql = `SELECT * FROM jobs WHERE ${where.join(" AND ")} ORDER BY updated_at DESC`;
+  const r = await c.execute({ sql, args });
   return r.rows.map((row) => rowToJob(row as unknown as Record<string, unknown>));
 }
 
-export async function getJob(id: string): Promise<Job | null> {
+/** Load a single job. Pass `includeDeleted: true` for the Trash view. */
+export async function getJob(id: string, opts: { includeDeleted?: boolean } = {}): Promise<Job | null> {
   const c = await db();
-  const r = await c.execute({ sql: "SELECT * FROM jobs WHERE id = ?", args: [id] });
+  const sql = opts.includeDeleted
+    ? "SELECT * FROM jobs WHERE id = ?"
+    : "SELECT * FROM jobs WHERE id = ? AND deleted_at IS NULL";
+  const r = await c.execute({ sql, args: [id] });
   if (r.rows.length === 0) return null;
   const job = rowToJob(r.rows[0] as unknown as Record<string, unknown>);
   const inputs = await c.execute({ sql: "SELECT * FROM job_inputs WHERE job_id = ? ORDER BY position", args: [id] });
@@ -122,20 +183,25 @@ export async function createJob(args: {
   name: string;
   mode: JobMode;
   criteria: JobCriteria;
-  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null }>;
+  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null; payloadV2?: JobInputPayloadV2 | null }>;
+  folderId?: string | null;
+  createdBy?: string | null;
+  /** 1 = legacy form-driven. 2 = CSV-driven per-row config. Defaults to 1 for back-compat. */
+  version?: JobVersion;
 }): Promise<string> {
   const c = await db();
   const id = uid("job");
   const now = Date.now();
+  const version: JobVersion = args.version ?? 1;
   await c.execute({
-    sql: "INSERT INTO jobs (id, name, mode, criteria, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-    args: [id, args.name, args.mode, JSON.stringify(args.criteria), now, now],
+    sql: "INSERT INTO jobs (id, name, mode, criteria, created_at, updated_at, folder_id, created_by, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    args: [id, args.name, args.mode, JSON.stringify(args.criteria), now, now, args.folderId ?? null, args.createdBy ?? null, version],
   });
   for (let i = 0; i < args.inputs.length; i++) {
     const inp = args.inputs[i];
     await c.execute({
-      sql: "INSERT INTO job_inputs (id, job_id, target_url, title, keywords, position) VALUES (?, ?, ?, ?, ?, ?)",
-      args: [uid("inp"), id, inp.targetUrl, inp.title, inp.keywords, i],
+      sql: "INSERT INTO job_inputs (id, job_id, target_url, title, keywords, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      args: [uid("inp"), id, inp.targetUrl, inp.title, inp.keywords, i, inp.payloadV2 ? JSON.stringify(inp.payloadV2) : null],
     });
   }
   return id;
@@ -151,7 +217,7 @@ export async function updateJob(args: {
   name: string;
   mode: JobMode;
   criteria: JobCriteria;
-  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null }>;
+  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null; payloadV2?: JobInputPayloadV2 | null }>;
 }): Promise<void> {
   const c = await db();
   const now = Date.now();
@@ -165,23 +231,75 @@ export async function updateJob(args: {
   for (let i = 0; i < args.inputs.length; i++) {
     const inp = args.inputs[i];
     await c.execute({
-      sql: "INSERT INTO job_inputs (id, job_id, target_url, title, keywords, position) VALUES (?, ?, ?, ?, ?, ?)",
-      args: [uid("inp"), args.id, inp.targetUrl, inp.title, inp.keywords, i],
+      sql: "INSERT INTO job_inputs (id, job_id, target_url, title, keywords, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      args: [uid("inp"), args.id, inp.targetUrl, inp.title, inp.keywords, i, inp.payloadV2 ? JSON.stringify(inp.payloadV2) : null],
     });
   }
 }
 
+/**
+ * Soft-delete: mark the job's deleted_at and clear any runner lease + flip a 'running'
+ * status to 'cancelled' so the Trash view doesn't show ghost-running jobs.
+ * Use `purgeJob` for permanent removal from the Trash view.
+ */
 export async function deleteJob(id: string): Promise<void> {
+  const c = await db();
+  const now = Date.now();
+  await c.execute({
+    sql: `UPDATE jobs
+            SET deleted_at = ?,
+                runner_id = NULL,
+                runner_heartbeat_at = NULL,
+                status = CASE WHEN status = 'running' THEN 'cancelled' ELSE status END,
+                updated_at = ?
+          WHERE id = ? AND deleted_at IS NULL`,
+    args: [now, now, id],
+  });
+}
+
+/** Bulk soft-delete. Returns count of rows newly tombstoned. */
+export async function deleteJobs(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const c = await db();
+  const now = Date.now();
+  const placeholders = ids.map(() => "?").join(",");
+  const r = await c.execute({
+    sql: `UPDATE jobs
+            SET deleted_at = ?,
+                runner_id = NULL,
+                runner_heartbeat_at = NULL,
+                status = CASE WHEN status = 'running' THEN 'cancelled' ELSE status END,
+                updated_at = ?
+          WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+    args: [now, now, ...ids],
+  });
+  return Number(r.rowsAffected ?? 0);
+}
+
+/** Restore a soft-deleted job. No-op if it isn't in trash. */
+export async function restoreJob(id: string): Promise<void> {
+  const c = await db();
+  await c.execute({
+    sql: "UPDATE jobs SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL",
+    args: [Date.now(), id],
+  });
+}
+
+/** Permanent removal — cascade-removes inputs and anchors via FK ON DELETE CASCADE. */
+export async function purgeJob(id: string): Promise<void> {
   const c = await db();
   await c.execute({ sql: "DELETE FROM jobs WHERE id = ?", args: [id] });
 }
 
-/** Bulk delete. Returns the number of rows actually removed. */
-export async function deleteJobs(ids: string[]): Promise<number> {
+/** Move jobs into a folder (or root with folderId=null). Returns count actually moved. */
+export async function moveJobsToFolder(ids: string[], folderId: string | null): Promise<number> {
   if (ids.length === 0) return 0;
   const c = await db();
   const placeholders = ids.map(() => "?").join(",");
-  const r = await c.execute({ sql: `DELETE FROM jobs WHERE id IN (${placeholders})`, args: ids });
+  const r = await c.execute({
+    sql: `UPDATE jobs SET folder_id = ?, updated_at = ? WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+    args: [folderId, Date.now(), ...ids],
+  });
   return Number(r.rowsAffected ?? 0);
 }
 
@@ -191,8 +309,8 @@ export async function replaceJobAnchors(jobId: string, anchors: Array<Omit<JobAn
   for (let i = 0; i < anchors.length; i++) {
     const a = anchors[i];
     await c.execute({
-      sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-      args: [a.id ?? uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, i],
+      sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      args: [a.id ?? uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, i, a.payloadV2 ? JSON.stringify(a.payloadV2) : null],
     });
   }
   await c.execute({ sql: "UPDATE jobs SET updated_at = ? WHERE id = ?", args: [Date.now(), jobId] });
@@ -275,8 +393,8 @@ export async function appendJobAnchors(
   for (let i = 0; i < anchors.length; i++) {
     const a = anchors[i];
     await c.execute({
-      sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-      args: [uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, startPos + i],
+      sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      args: [uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, startPos + i, a.payloadV2 ? JSON.stringify(a.payloadV2) : null],
     });
   }
   await c.execute({ sql: "UPDATE jobs SET updated_at = ? WHERE id = ?", args: [Date.now(), jobId] });
@@ -394,4 +512,365 @@ export async function getRunnerLease(jobId: string): Promise<{ runnerId: string 
     runnerId: row.runner_id == null ? null : String(row.runner_id),
     heartbeatAgeMs: row.runner_heartbeat_at == null ? null : (Date.now() - Number(row.runner_heartbeat_at)),
   };
+}
+
+// ============================================================================
+// Folders — organizational tree for the jobs list (2026-05-24)
+// ============================================================================
+// Model: jobs.folder_id (nullable) points at folders.id; NULL = root. Folders
+// are a self-referential tree via folders.parent_id (NULL = top-level).
+// Soft-delete: folders.deleted_at + jobs.deleted_at. Deleting a folder cascades
+// the tombstone to every descendant folder + every job in the subtree, so the
+// whole branch disappears from the browser at once. Restoring a folder by id
+// only restores that folder + its descendants — jobs that were already in the
+// trash before the cascade stay in the trash.
+
+/** Get a single folder by id. Pass `includeDeleted: true` for the Trash view. */
+export async function getFolder(id: string, opts: { includeDeleted?: boolean } = {}): Promise<Folder | null> {
+  const c = await db();
+  const sql = opts.includeDeleted
+    ? "SELECT * FROM folders WHERE id = ?"
+    : "SELECT * FROM folders WHERE id = ? AND deleted_at IS NULL";
+  const r = await c.execute({ sql, args: [id] });
+  if (r.rows.length === 0) return null;
+  return rowToFolder(r.rows[0] as unknown as Record<string, unknown>);
+}
+
+/** List direct children of a parent folder. `parentId === null` = top-level folders. */
+export async function listChildFolders(parentId: string | null, opts: { includeDeleted?: boolean } = {}): Promise<Folder[]> {
+  const c = await db();
+  const deletedClause = opts.includeDeleted ? "" : " AND deleted_at IS NULL";
+  const sql = parentId === null
+    ? `SELECT * FROM folders WHERE parent_id IS NULL${deletedClause} ORDER BY LOWER(name) ASC`
+    : `SELECT * FROM folders WHERE parent_id = ?${deletedClause} ORDER BY LOWER(name) ASC`;
+  const r = await c.execute(parentId === null ? sql : { sql, args: [parentId] });
+  return r.rows.map((row) => rowToFolder(row as unknown as Record<string, unknown>));
+}
+
+/** All folders (live), for the move-modal tree picker. */
+export async function listAllFolders(): Promise<Folder[]> {
+  const c = await db();
+  const r = await c.execute("SELECT * FROM folders WHERE deleted_at IS NULL ORDER BY LOWER(name) ASC");
+  return r.rows.map((row) => rowToFolder(row as unknown as Record<string, unknown>));
+}
+
+/** Walk parent_id up to the root. Returns [root, …, self]. */
+export async function getFolderBreadcrumb(id: string): Promise<Folder[]> {
+  const chain: Folder[] = [];
+  let cursor: string | null = id;
+  // Hard cap protects against a pathological cycle if data ever got corrupted.
+  for (let i = 0; i < 64 && cursor; i++) {
+    const f = await getFolder(cursor, { includeDeleted: true });
+    if (!f) break;
+    chain.unshift(f);
+    cursor = f.parentId;
+  }
+  return chain;
+}
+
+/** Recursively collect every descendant folder id (does NOT include the folder itself). */
+async function getDescendantFolderIds(folderId: string): Promise<string[]> {
+  const c = await db();
+  const out: string[] = [];
+  let frontier: string[] = [folderId];
+  while (frontier.length > 0) {
+    const placeholders = frontier.map(() => "?").join(",");
+    const r = await c.execute({
+      sql: `SELECT id FROM folders WHERE parent_id IN (${placeholders})`,
+      args: frontier,
+    });
+    const next = r.rows.map((row) => String((row as unknown as Record<string, unknown>).id));
+    for (const id of next) out.push(id);
+    frontier = next;
+  }
+  return out;
+}
+
+/**
+ * Folder rows ready for the browser: each child of `parentId`, with counts of
+ * jobs and subfolders DIRECTLY inside (not recursive). The count matches what
+ * you'll see when you click into the folder — no surprise where "8 jobs" on a
+ * folder row resolves to "3 jobs visible after click + 5 hidden in subfolders".
+ */
+export async function listFolderRows(parentId: string | null): Promise<FolderRow[]> {
+  const children = await listChildFolders(parentId);
+  const out: FolderRow[] = [];
+  const c = await db();
+  for (const f of children) {
+    const [jobsR, subR] = await Promise.all([
+      c.execute({
+        sql: "SELECT COUNT(*) AS n FROM jobs WHERE deleted_at IS NULL AND folder_id = ?",
+        args: [f.id],
+      }),
+      c.execute({
+        sql: "SELECT COUNT(*) AS n FROM folders WHERE deleted_at IS NULL AND parent_id = ?",
+        args: [f.id],
+      }),
+    ]);
+    out.push({
+      ...f,
+      jobCount: Number((jobsR.rows[0] as unknown as Record<string, unknown>).n ?? 0),
+      subfolderCount: Number((subR.rows[0] as unknown as Record<string, unknown>).n ?? 0),
+    });
+  }
+  return out;
+}
+
+export async function createFolder(args: { name: string; parentId: string | null }): Promise<string> {
+  const c = await db();
+  const id = uid("fld");
+  const now = Date.now();
+  await c.execute({
+    sql: "INSERT INTO folders (id, parent_id, name, created_at) VALUES (?, ?, ?, ?)",
+    args: [id, args.parentId, args.name.trim(), now],
+  });
+  return id;
+}
+
+export async function renameFolder(id: string, name: string): Promise<void> {
+  const c = await db();
+  await c.execute({ sql: "UPDATE folders SET name = ? WHERE id = ?", args: [name.trim(), id] });
+}
+
+/**
+ * Move a folder to a new parent (or to root with `newParentId = null`).
+ * Rejects cycles: you cannot move a folder into itself or into one of its descendants.
+ */
+export async function moveFolder(id: string, newParentId: string | null): Promise<{ ok: boolean; message?: string }> {
+  if (newParentId === id) return { ok: false, message: "Cannot move a folder into itself." };
+  if (newParentId !== null) {
+    // Walk the proposed parent's ancestor chain. If we encounter `id`, it's a cycle.
+    const ancestors = await getFolderBreadcrumb(newParentId);
+    if (ancestors.some((a) => a.id === id)) {
+      return { ok: false, message: "Cannot move a folder into one of its own subfolders." };
+    }
+  }
+  const c = await db();
+  await c.execute({ sql: "UPDATE folders SET parent_id = ? WHERE id = ?", args: [newParentId, id] });
+  return { ok: true };
+}
+
+/**
+ * Soft-delete a folder and CASCADE the tombstone to:
+ *   - every descendant folder
+ *   - every live job in the subtree (jobs already in trash are untouched)
+ * Restoring just brings the folder + descendants back. Jobs that were tombstoned
+ * by this cascade have the same deleted_at timestamp, so the Trash view can group
+ * them as "deleted with folder X" if we ever want that — not implemented yet.
+ */
+export async function softDeleteFolder(id: string): Promise<void> {
+  const c = await db();
+  const now = Date.now();
+  const descendants = await getDescendantFolderIds(id);
+  const allFolderIds = [id, ...descendants];
+  const placeholders = allFolderIds.map(() => "?").join(",");
+  // Mark folders
+  await c.execute({
+    sql: `UPDATE folders SET deleted_at = ? WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+    args: [now, ...allFolderIds],
+  });
+  // Tombstone live jobs in any of those folders
+  await c.execute({
+    sql: `UPDATE jobs
+            SET deleted_at = ?,
+                runner_id = NULL,
+                runner_heartbeat_at = NULL,
+                status = CASE WHEN status = 'running' THEN 'cancelled' ELSE status END,
+                updated_at = ?
+          WHERE deleted_at IS NULL AND folder_id IN (${placeholders})`,
+    args: [now, now, ...allFolderIds],
+  });
+}
+
+/**
+ * Restore a soft-deleted folder + every descendant folder + every job that was
+ * deleted as part of the same cascade (same deleted_at timestamp on the folder).
+ * Jobs that were already in trash before the cascade have a DIFFERENT timestamp
+ * and are left in the trash — restore them individually if needed.
+ */
+export async function restoreFolder(id: string): Promise<void> {
+  const c = await db();
+  const f = await getFolder(id, { includeDeleted: true });
+  if (!f || f.deletedAt == null) return;
+  const cascadeStamp = f.deletedAt;
+  // Walk the (deleted) descendant tree starting from `id`.
+  const out: string[] = [];
+  let frontier: string[] = [id];
+  while (frontier.length > 0) {
+    const placeholders = frontier.map(() => "?").join(",");
+    const r = await c.execute({
+      sql: `SELECT id FROM folders WHERE parent_id IN (${placeholders})`,
+      args: frontier,
+    });
+    const next = r.rows.map((row) => String((row as unknown as Record<string, unknown>).id));
+    for (const next_id of next) out.push(next_id);
+    frontier = next;
+  }
+  const allFolderIds = [id, ...out];
+  const placeholders = allFolderIds.map(() => "?").join(",");
+  // Untombstone folders that share the cascade timestamp (avoid resurrecting
+  // folders the user deleted separately and just happen to be descendants).
+  await c.execute({
+    sql: `UPDATE folders SET deleted_at = NULL WHERE id IN (${placeholders}) AND deleted_at = ?`,
+    args: [...allFolderIds, cascadeStamp],
+  });
+  // Same logic for jobs in the subtree.
+  await c.execute({
+    sql: `UPDATE jobs SET deleted_at = NULL, updated_at = ?
+          WHERE folder_id IN (${placeholders}) AND deleted_at = ?`,
+    args: [Date.now(), ...allFolderIds, cascadeStamp],
+  });
+}
+
+/** Hard-delete folder + descendants + all contained jobs. Irreversible. */
+export async function purgeFolder(id: string): Promise<void> {
+  const c = await db();
+  const descendants = await getDescendantFolderIds(id);
+  const allFolderIds = [id, ...descendants];
+  const placeholders = allFolderIds.map(() => "?").join(",");
+  // Jobs first (FK has ON DELETE CASCADE from folders → jobs.folder_id, but jobs.folder_id
+  // has no FK constraint in our schema — explicit DELETE is clearer + portable).
+  await c.execute({
+    sql: `DELETE FROM jobs WHERE folder_id IN (${placeholders})`,
+    args: allFolderIds,
+  });
+  await c.execute({
+    sql: `DELETE FROM folders WHERE id IN (${placeholders})`,
+    args: allFolderIds,
+  });
+}
+
+/** List soft-deleted items for the Trash view (folders + jobs, separately). */
+export async function listTrash(): Promise<{ folders: Folder[]; jobs: Job[] }> {
+  const c = await db();
+  const [foldersR, jobsR] = await Promise.all([
+    c.execute("SELECT * FROM folders WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"),
+    c.execute("SELECT * FROM jobs WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"),
+  ]);
+  return {
+    folders: foldersR.rows.map((row) => rowToFolder(row as unknown as Record<string, unknown>)),
+    jobs: jobsR.rows.map((row) => rowToJob(row as unknown as Record<string, unknown>)),
+  };
+}
+
+// ============================================================================
+// Model pricing (2026-05-24, "Drop Sherlock-style" cost tracking)
+// ============================================================================
+// One row per (provider, model). Rates in USD per 1 MILLION tokens. Editing here
+// does NOT retroactively recompute old jobs' costs — those are locked in at
+// batch-write time via addJobCostAndTokens below. Missing rows = $0/M for both;
+// the UI shows a "missing pricing" warning to flag this.
+
+function rowToModelPricing(r: Record<string, unknown>): ModelPricing {
+  return {
+    providerId: String(r.provider) as ProviderId,
+    model: String(r.model),
+    inputPerMillion: Number(r.input_per_million ?? 0),
+    outputPerMillion: Number(r.output_per_million ?? 0),
+    updatedAt: Number(r.updated_at ?? 0),
+  };
+}
+
+export async function listModelPricing(): Promise<ModelPricing[]> {
+  const c = await db();
+  const r = await c.execute("SELECT * FROM model_pricing ORDER BY provider, model");
+  return r.rows.map((row) => rowToModelPricing(row as unknown as Record<string, unknown>));
+}
+
+export async function getModelPricing(providerId: ProviderId, model: string): Promise<ModelPricing | null> {
+  const c = await db();
+  const r = await c.execute({
+    sql: "SELECT * FROM model_pricing WHERE provider = ? AND model = ?",
+    args: [providerId, model],
+  });
+  if (r.rows.length === 0) return null;
+  return rowToModelPricing(r.rows[0] as unknown as Record<string, unknown>);
+}
+
+/** Upsert a pricing row. Use 0 for either rate when the provider is genuinely free. */
+export async function saveModelPricing(p: Omit<ModelPricing, "updatedAt">): Promise<void> {
+  const c = await db();
+  await c.execute({
+    sql: `INSERT INTO model_pricing (provider, model, input_per_million, output_per_million, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(provider, model) DO UPDATE SET
+            input_per_million = excluded.input_per_million,
+            output_per_million = excluded.output_per_million,
+            updated_at = excluded.updated_at`,
+    args: [p.providerId, p.model, p.inputPerMillion, p.outputPerMillion, Date.now()],
+  });
+}
+
+export async function deleteModelPricing(providerId: ProviderId, model: string): Promise<void> {
+  const c = await db();
+  await c.execute({
+    sql: "DELETE FROM model_pricing WHERE provider = ? AND model = ?",
+    args: [providerId, model],
+  });
+}
+
+/**
+ * Add tokens + cost to a job after a successful batch. Atomic UPDATE (no read-modify-
+ * write race even if two batches finish near-simultaneously — SQLite serializes the
+ * writes thanks to WAL). Cost is captured by the caller using the pricing row that
+ * existed at write time; this function just adds it.
+ */
+export async function addJobCostAndTokens(
+  jobId: string,
+  delta: { inputTokens: number; outputTokens: number; cachedInputTokens: number; costUsd: number }
+): Promise<void> {
+  const c = await db();
+  await c.execute({
+    sql: `UPDATE jobs SET
+            ai_input_tokens = ai_input_tokens + ?,
+            ai_output_tokens = ai_output_tokens + ?,
+            ai_cached_input_tokens = ai_cached_input_tokens + ?,
+            ai_cost_usd = ai_cost_usd + ?,
+            updated_at = ?
+          WHERE id = ?`,
+    args: [
+      Math.max(0, Math.floor(delta.inputTokens)),
+      Math.max(0, Math.floor(delta.outputTokens)),
+      Math.max(0, Math.floor(delta.cachedInputTokens)),
+      Math.max(0, delta.costUsd),
+      Date.now(),
+      jobId,
+    ],
+  });
+}
+
+/**
+ * Compute the USD cost for one AI call using the pricing row that exists RIGHT NOW.
+ * Returns 0 if there's no pricing row (caller can detect by checking `priced=false`).
+ * Math: (inputTokens × inputPerMillion + outputTokens × outputPerMillion) / 1_000_000.
+ * Cached input tokens are billed at the same rate — we don't apply a discount because
+ * provider discount semantics aren't reliably published; we just surface the cache-hit
+ * count separately for visibility.
+ */
+export async function computeAiCost(args: {
+  providerId: ProviderId;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+}): Promise<{ costUsd: number; priced: boolean }> {
+  const row = await getModelPricing(args.providerId, args.model);
+  if (!row) return { costUsd: 0, priced: false };
+  const cost = (args.inputTokens * row.inputPerMillion + args.outputTokens * row.outputPerMillion) / 1_000_000;
+  return { costUsd: cost, priced: true };
+}
+
+/** Zero out a job's cost counters. Called on rerun (when anchors are cleared) so
+ *  "this run" is the only contribution to the displayed cost. */
+export async function resetJobCost(jobId: string): Promise<void> {
+  const c = await db();
+  await c.execute({
+    sql: `UPDATE jobs SET
+            ai_input_tokens = 0,
+            ai_output_tokens = 0,
+            ai_cached_input_tokens = 0,
+            ai_cost_usd = 0,
+            updated_at = ?
+          WHERE id = ?`,
+    args: [Date.now(), jobId],
+  });
 }

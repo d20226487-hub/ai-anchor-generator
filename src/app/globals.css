@@ -23,7 +23,7 @@
   --cat-keyword-fg: #93c5fd;
   --cat-url-bg: rgba(16, 185, 129, 0.18);
   --cat-url-fg: #6ee7b7;
-  /* Status chip colors (dark-mode defaults) — see STATUS_VISUALS in JobsList.tsx.
+  /* Status chip colors (dark-mode defaults) — see STATUS_VISUALS in FolderBrowser.tsx.
      fg values are deliberately bright (200–300 Tailwind range) so text reads cleanly
      against the dark surface and the colored bg tint. */
   --status-idle-bg: rgba(148, 163, 184, 0.20);

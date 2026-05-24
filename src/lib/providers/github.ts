@@ -1,3 +1,5 @@
+import type { ProviderUsage } from "../types";
+
 interface Args {
   apiKey: string;
   baseUrl: string;
@@ -7,13 +9,31 @@ interface Args {
   timeoutMs: number;
 }
 
+export interface CallResult {
+  text: string;
+  usage: ProviderUsage;
+}
+
 interface ChatResponse {
   choices?: Array<{ message?: { content?: string } }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
   error?: { message?: string; code?: string };
   message?: string;
 }
 
-export async function callGitHubModels(args: Args): Promise<string> {
+const ZERO_USAGE: ProviderUsage = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 };
+
+function usageFromGitHub(u: ChatResponse["usage"]): ProviderUsage {
+  if (!u) return ZERO_USAGE;
+  return {
+    inputTokens: Number(u.prompt_tokens ?? 0),
+    outputTokens: Number(u.completion_tokens ?? 0),
+    // GitHub Models doesn't expose a prompt-cache field — leave 0.
+    cachedInputTokens: 0,
+  };
+}
+
+export async function callGitHubModels(args: Args): Promise<CallResult> {
   const { apiKey, baseUrl, model, prompt, timeoutMs } = args;
 
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
@@ -79,7 +99,7 @@ export async function callGitHubModels(args: Args): Promise<string> {
   if (typeof content !== "string") {
     throw new Error(`GitHub Models: response missing message content. Raw: ${text.slice(0, 300)}`);
   }
-  return content;
+  return { text: content, usage: usageFromGitHub(data?.usage) };
 }
 
 async function retryWithoutJsonFormat(
@@ -87,7 +107,7 @@ async function retryWithoutJsonFormat(
   apiKey: string,
   body: { model: string; messages: Array<{ role: string; content: string }>; temperature: number },
   timeoutMs: number,
-): Promise<string> {
+): Promise<CallResult> {
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -103,5 +123,5 @@ async function retryWithoutJsonFormat(
   const data = JSON.parse(text) as ChatResponse;
   const content = data.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error(`GitHub Models: empty response`);
-  return content;
+  return { text: content, usage: usageFromGitHub(data.usage) };
 }

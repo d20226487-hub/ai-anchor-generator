@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Input, Select } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/Dialog";
+import { CostPill } from "@/components/CostPill";
 import { useToast } from "@/components/ui/Toast";
 import {
   actionDeleteJob,
@@ -33,7 +34,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise<void>((res) => setTimeout(res, ms));
 }
 
-export function JobView({ job }: { job: Job }) {
+export function JobView({ job, pricingMissing = false }: { job: Job; pricingMissing?: boolean }) {
   const router = useRouter();
   const { toast } = useToast();
   const { t } = useT();
@@ -344,9 +345,12 @@ export function JobView({ job }: { job: Job }) {
               <Pencil className="h-3.5 w-3.5 text-[var(--color-text-faint)]" />
             </h1>
           )}
-          <p className="text-xs text-[var(--color-text-dim)] mt-1">
-            {t(job.mode === "one_site" ? "modes.one_site" : "modes.multi_site")} ·{" "}
-            {anchors.length} {t("jobsList.columns.anchors").toLowerCase()} · {job.criteria.providerId} / {job.criteria.model}
+          <p className="text-xs text-[var(--color-text-dim)] mt-1 flex items-center gap-2 flex-wrap">
+            <span>
+              {t(job.mode === "one_site" ? "modes.one_site" : "modes.multi_site")} ·{" "}
+              {anchors.length} {t("jobsList.columns.anchors").toLowerCase()} · {job.criteria.providerId} / {job.criteria.model}
+            </span>
+            <CostPill job={job} pricingMissing={pricingMissing} compact />
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">

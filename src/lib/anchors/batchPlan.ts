@@ -112,3 +112,163 @@ export function planBatch(args: {
 
   return { inputsInBatch, hints };
 }
+
+// =====================================================================
+// V2 batch planning (2026-05-24, revised)
+// V2 packs INPUT ROWS into a batch until the cumulative anchor total reaches a target
+// cap (default 200). When a single row asks for more than the target, the row is
+// SPLIT across multiple sub-batches — each sub-batch carries a proportional slice of
+// the row's per-category counts. All sub-batches share the same input.id, so anchors
+// land back on the same input row in the DB.
+//
+// `BatchPlan.batchSize` in V2 = TARGET ANCHORS per batch (not rows). Re-uses the existing
+// jobs.batch_size INTEGER column.
+//
+// Edge cases:
+//   - Single row exactly at target: one batch.
+//   - Empty inputs → batchesTotal=1, planBatchV2 returns []. Loop ends as "failed" with
+//     "No batches produced anchors".
+//   - A row with 0 numberOfLinks (validation should reject this) → skipped during plan.
+// =====================================================================
+
+import type { AnchorCategory } from "../types";
+
+const DEFAULT_V2_TARGET_ANCHORS_PER_BATCH = 200;
+
+export interface V2BatchEntry {
+  /** The originating input row. Carries id, targetUrl, and full payloadV2 for linkType/geo/lang echo. */
+  input: JobInput;
+  /**
+   * EXACT integer counts the AI should produce for this entry within THIS batch.
+   * For unsplit rows: sum equals the row's payloadV2.numberOfLinks.
+   * For split rows: sum is a slice; concatenating all sub-batches gives the row's total.
+   */
+  exactCounts: Record<AnchorCategory, number>;
+}
+
+/** Hamilton/largest-remainder rounding: turn 4 floats summing to `total` into 4 ints. */
+function hamiltonInts(parts: Record<AnchorCategory, number>, total: number): Record<AnchorCategory, number> {
+  if (total <= 0) return { url: 0, branded: 0, generic: 0, keyword: 0 };
+  const cats: AnchorCategory[] = ["url", "branded", "generic", "keyword"];
+  const sum = cats.reduce((a, k) => a + (parts[k] ?? 0), 0) || 1;
+  const raw = cats.map((k) => ((parts[k] ?? 0) / sum) * total);
+  const floor = raw.map((x) => Math.floor(x));
+  let allocated = floor.reduce((a, b) => a + b, 0);
+  const remainder = raw.map((x, i) => ({ i, rem: x - floor[i] }));
+  remainder.sort((a, b) => b.rem - a.rem);
+  for (const { i } of remainder) {
+    if (allocated >= total) break;
+    floor[i]++;
+    allocated++;
+  }
+  return { url: floor[0], branded: floor[1], generic: floor[2], keyword: floor[3] };
+}
+
+/**
+ * Compute the row's full per-category counts (Hamilton-rounded to sum to numberOfLinks).
+ * This is the "target" we then slice across one or more sub-batches.
+ */
+function rowExactCounts(input: JobInput): Record<AnchorCategory, number> {
+  const p = input.payloadV2;
+  if (!p) return { url: 0, branded: 0, generic: 0, keyword: 0 };
+  return hamiltonInts(
+    {
+      url: p.distribution.url ?? 0,
+      branded: p.distribution.branded ?? 0,
+      generic: p.distribution.generic ?? 0,
+      keyword: p.distribution.keyword ?? 0,
+    },
+    p.numberOfLinks
+  );
+}
+
+/**
+ * The core: convert a list of inputs into a flat list of batches, each containing one or
+ * more V2BatchEntry items. Rows that exceed the target on their own get split across
+ * multiple consecutive batches, each carrying a Hamilton-rounded slice of the row's
+ * remaining per-category counts.
+ *
+ * Slicing strategy for a heavy row:
+ *   - Remaining-per-category starts at the row's full Hamilton-rounded counts.
+ *   - Each sub-batch takes `min(remainingTotal, target)` anchors, allocated proportionally
+ *     across the remaining categories via a second Hamilton.
+ *   - Subtract from remaining; repeat until remaining = 0.
+ *   This guarantees the sum across sub-batches equals the row's intended total.
+ */
+function computeBatches(inputs: JobInput[], target: number): V2BatchEntry[][] {
+  const batches: V2BatchEntry[][] = [];
+  let current: V2BatchEntry[] = [];
+  let currentTotal = 0;
+
+  const closeBatch = () => {
+    if (current.length > 0) {
+      batches.push(current);
+      current = [];
+      currentTotal = 0;
+    }
+  };
+
+  for (const input of inputs) {
+    const n = input.payloadV2?.numberOfLinks ?? 0;
+    if (n <= 0) continue;
+
+    // Tracks how many anchors remain per category for THIS row as we slice.
+    let remaining = rowExactCounts(input);
+    let remainingTotal = remaining.url + remaining.branded + remaining.generic + remaining.keyword;
+
+    while (remainingTotal > 0) {
+      const capacity = target - currentTotal;
+
+      // If the current batch is non-empty and has zero capacity for any of this row's
+      // remaining anchors, close it and start fresh. This is the "pack-until-N" closure.
+      if (capacity <= 0 && current.length > 0) {
+        closeBatch();
+        continue;
+      }
+
+      // Decide how many of this row's remaining anchors land in this batch.
+      // Take the smaller of: full row-remainder OR the current batch's free capacity.
+      const take = Math.min(remainingTotal, capacity > 0 ? capacity : target);
+
+      // Slice `take` anchors out of `remaining`, Hamilton-rounded by the remaining ratios.
+      const slice = hamiltonInts(remaining as Record<AnchorCategory, number>, take);
+      current.push({ input, exactCounts: slice });
+      currentTotal += take;
+
+      // Subtract slice from remaining.
+      remaining = {
+        url: remaining.url - slice.url,
+        branded: remaining.branded - slice.branded,
+        generic: remaining.generic - slice.generic,
+        keyword: remaining.keyword - slice.keyword,
+      };
+      remainingTotal = remaining.url + remaining.branded + remaining.generic + remaining.keyword;
+
+      // If the batch is at or above target, close it. Otherwise keep packing more rows.
+      if (currentTotal >= target) closeBatch();
+    }
+  }
+  closeBatch();
+  if (batches.length === 0) batches.push([]); // ensure batchesTotal >= 1
+  return batches;
+}
+
+/** Number of batches needed for the run. Persisted on jobs.batches_total. */
+export function planBatchesV2(inputs: JobInput[], targetAnchorsPerBatch = DEFAULT_V2_TARGET_ANCHORS_PER_BATCH): BatchPlan {
+  const target = Math.max(1, targetAnchorsPerBatch);
+  const batches = computeBatches(inputs, target);
+  return { batchSize: target, batchesTotal: Math.max(1, batches.length) };
+}
+
+/** Entries (input + exact counts) for the requested batch index. Deterministic given same inputs + target. */
+export function planBatchV2(args: {
+  batchIndex: number;
+  inputs: JobInput[];
+  /** Same target used by planBatchesV2 when the job was created. Persisted as jobs.batch_size. */
+  targetAnchorsPerBatch?: number;
+}): V2BatchEntry[] {
+  const { batchIndex, inputs, targetAnchorsPerBatch = DEFAULT_V2_TARGET_ANCHORS_PER_BATCH } = args;
+  const target = Math.max(1, targetAnchorsPerBatch);
+  const batches = computeBatches(inputs, target);
+  return batches[batchIndex] ?? [];
+}

@@ -3,9 +3,15 @@
 import { revalidatePath } from "next/cache";
 import { loadSettings, mergeIncomingSettings, redactSettings, saveSettings } from "./settings";
 import {
+  addJobCostAndTokens,
   appendJobAnchors,
   clearJobAnchors,
   clearRunnerLease,
+  computeAiCost,
+  createFolder,
+  deleteModelPricing,
+  listModelPricing,
+  saveModelPricing,
   createJob,
   deleteJob,
   deleteJobs,
@@ -13,9 +19,18 @@ import {
   getAnchorsByIds,
   getJob,
   getRunnerLease,
+  moveFolder,
+  moveJobsToFolder,
+  purgeFolder,
+  purgeJob,
+  renameFolder,
   renameJob,
   replaceJobAnchors,
+  resetJobCost,
+  restoreFolder,
+  restoreJob,
   setJobStatus,
+  softDeleteFolder,
   updateAnchorFollow,
   updateAnchorText,
   updateAnchorsByMap,
@@ -23,14 +38,15 @@ import {
 } from "./jobs";
 import { isLoopRunning, runJobLoop, stopJobLoop } from "./jobLoop";
 import { pingProvider, callProvider } from "./providers";
-import { composeGenerationPrompt, composeRegenerationPrompt } from "./anchors/compose";
-import { planBatches } from "./anchors/batchPlan";
-import { planRebalance, type RebalanceMode } from "./anchors/rebalance";
+import { composeGenerationPrompt, composeGenerationPromptV2, composeRegenerationPrompt, composeRegenerationPromptV2 } from "./anchors/compose";
+import { planBatches, planBatchesV2, planBatchV2 } from "./anchors/batchPlan";
+import { resolveProviderLimits } from "./providers/limits";
+import { planRebalance, planRebalanceV2, type RebalanceMode } from "./anchors/rebalance";
 import { brandKeyOf as brandKeyForAnchor, brandKeyOf, matchBrand } from "./anchors/brands";
 import { db } from "./db";
-import { parseAnchorsResponse, parseRegenResponse } from "./anchors/parse";
+import { parseAnchorsResponse, parseAnchorsResponseV2, parseRegenResponse } from "./anchors/parse";
 import { quickFixDofollowRatio } from "./anchors/quickfix";
-import type { Brand, JobCriteria, JobMode, Locale, ProviderId, SettingsBlob, Theme, JobAnchor } from "./types";
+import type { Brand, JobCriteria, JobInputPayloadV2, JobMode, Locale, ModelPricing, ProviderId, SettingsBlob, Theme, JobAnchor } from "./types";
 import { uid } from "./utils";
 
 // ----- Settings -----
@@ -86,7 +102,14 @@ export interface CreateJobArgs {
   name: string;
   mode: JobMode;
   criteria: JobCriteria;
-  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null }>;
+  /** Each input may carry a V2 payload. V1 inputs leave payloadV2 undefined. */
+  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null; payloadV2?: JobInputPayloadV2 | null }>;
+  /** Containing folder; null = root. */
+  folderId?: string | null;
+  /** Display-name attribution from the browser. The Settings modal blocks the UI until set. */
+  createdBy?: string | null;
+  /** Job version. 1 = legacy flow (default). 2 = CSV-driven per-row config. */
+  version?: 1 | 2;
 }
 
 export async function actionCreateJob(args: CreateJobArgs): Promise<string> {
@@ -160,7 +183,18 @@ export async function actionStartGeneration(
   const inputs = job.inputs ?? [];
   if (inputs.length === 0) return { ok: false, message: "Job has no inputs", batchSize: 0, batchesTotal: 0 };
 
-  const planned = planBatches(job.criteria, inputs, opts.batchInputSize ?? 10);
+  // V1 chunks by INPUT count (10 rows/batch). V2 chunks by ANCHOR count — pack rows
+  // (and split heavy rows) until each AI call asks for ~v2BatchTargetAnchors anchors.
+  // The target is per-provider (Settings → Advanced → "V2 batch target"). Caller can
+  // override via opts.batchInputSize for testing.
+  let planned;
+  if (job.version === 2) {
+    const target = opts.batchInputSize
+      ?? resolveProviderLimits(await loadSettings().then((s) => s.providers[job.criteria.providerId])).v2BatchTargetAnchors;
+    planned = planBatchesV2(inputs, target);
+  } else {
+    planned = planBatches(job.criteria, inputs, opts.batchInputSize ?? 10);
+  }
 
   if (opts.resume) {
     // Don't touch anchors or progress — just flip status back to running and clear the
@@ -179,6 +213,10 @@ export async function actionStartGeneration(
 
   if (opts.resetAnchors !== false) {
     await clearJobAnchors(jobId);
+    // Anchors clear → reset cost. Drop Sherlock's lock-in semantics mean "this run's cost"
+    // is the only thing we want to show after a rerun. Resume (which doesn't clear
+    // anchors) keeps the existing cost intact and continues accumulating.
+    await resetJobCost(jobId);
   }
   await clearRunnerLease(jobId);
   await setJobStatus(jobId, "running", {
@@ -341,7 +379,21 @@ export async function actionRebalanceBrand(
 
     let raw: string;
     try {
-      raw = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+      const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+      raw = result.text;
+      // Rebalance is an AI call → spend tokens → lock in cost. Same pattern as the loop.
+      const cost = await computeAiCost({
+        providerId: job.criteria.providerId,
+        model: job.criteria.model,
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+      });
+      await addJobCostAndTokens(jobId, {
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        cachedInputTokens: result.usage.cachedInputTokens,
+        costUsd: cost.costUsd,
+      });
     } catch (e) {
       return { ok: false, message: e instanceof Error ? e.message : String(e), brandKey, deleted: 0, added: 0, warnings: plan.warnings };
     }
@@ -411,6 +463,153 @@ export async function actionRebalanceBrand(
   };
 }
 
+// =====================================================================
+// V2 rebalance — per (Target URL, Link Type) (2026-05-24)
+// =====================================================================
+
+export interface RebalanceV2RowResult {
+  ok: boolean;
+  message: string;
+  url: string;
+  linkType: string;
+  deleted: number;
+  added: number;
+  warnings: string[];
+}
+
+/**
+ * Rebalance ONE (Target URL, Link Type) group on a V2 job. Manual edits preserved.
+ * Two modes: 'surgical' trims surplus + tops up deficit; 'replace_ai' wipes all AI
+ * anchors and regenerates to target. Sequential per-group is the caller's job — this
+ * action handles just one group per call.
+ */
+export async function actionRebalanceV2Row(
+  jobId: string,
+  url: string,
+  linkType: string,
+  opts: { mode: RebalanceMode }
+): Promise<RebalanceV2RowResult> {
+  const settings = await loadSettings();
+  const job = await getJob(jobId);
+  if (!job) return { ok: false, message: "Job not found", url, linkType, deleted: 0, added: 0, warnings: [] };
+  if (job.version !== 2) return { ok: false, message: "Job is not V2", url, linkType, deleted: 0, added: 0, warnings: [] };
+
+  const rowAnchors = (job.anchors ?? []).filter((a) => a.targetUrl === url && (a.payloadV2?.linkType ?? "") === linkType);
+  const rowInputs = (job.inputs ?? []).filter((i) => i.targetUrl === url && i.payloadV2?.linkType === linkType);
+  if (rowInputs.length === 0) {
+    return { ok: false, message: `No V2 input for ${url} / ${linkType}`, url, linkType, deleted: 0, added: 0, warnings: [] };
+  }
+
+  // Normalize rowInputs so the planner sees non-null payloadV2.
+  const inputsForPlan = rowInputs
+    .filter((i) => i.payloadV2 != null)
+    .map((i) => ({ id: i.id, payloadV2: i.payloadV2! }));
+
+  const plan = planRebalanceV2({ rowAnchors, rowInputs: inputsForPlan, mode: opts.mode });
+  if (plan.generate.total === 0 && plan.deleteIds.length === 0) {
+    return { ok: true, message: "Row is already on target — nothing to do.", url, linkType, deleted: 0, added: 0, warnings: plan.warnings };
+  }
+
+  let added = 0;
+  if (plan.generate.total > 0) {
+    // Build a single V2BatchEntry that asks the AI for the deficit. The entry's input
+    // id is reused from the row's first input, so produced anchors map back via the
+    // existing byId lookup pattern. exactCounts comes from the planner.
+    const ownerInput = rowInputs[0];
+    if (!ownerInput.payloadV2) {
+      return { ok: false, message: "Owner input is missing V2 payload", url, linkType, deleted: 0, added: 0, warnings: plan.warnings };
+    }
+    const entry = {
+      input: ownerInput,
+      exactCounts: plan.generate.perCategory,
+    };
+    const prompt = composeGenerationPromptV2({
+      template: settings.prompts.v2.generation,
+      entries: [entry],
+    });
+
+    let raw: string;
+    let usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number };
+    try {
+      const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+      raw = result.text;
+      usage = result.usage;
+      // Lock in cost — same write-time pattern as the main loop.
+      const cost = await computeAiCost({
+        providerId: job.criteria.providerId,
+        model: job.criteria.model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+      });
+      await addJobCostAndTokens(jobId, {
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedInputTokens: usage.cachedInputTokens,
+        costUsd: cost.costUsd,
+      });
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e), url, linkType, deleted: 0, added: 0, warnings: plan.warnings };
+    }
+
+    let parsed: ReturnType<typeof parseAnchorsResponseV2>;
+    try {
+      parsed = parseAnchorsResponseV2(raw);
+    } catch (e) {
+      return {
+        ok: false,
+        message: `Could not parse AI output: ${e instanceof Error ? e.message : String(e)}`,
+        url, linkType, deleted: 0, added: 0, warnings: plan.warnings,
+      };
+    }
+    if (parsed.length === 0) {
+      return { ok: false, message: "AI returned no anchors", url, linkType, deleted: 0, added: 0, warnings: plan.warnings };
+    }
+
+    // Map back by id — all parsed anchors should carry the owner's input id since we sent
+    // only one entry. If the AI hallucinates other ids we drop them.
+    const ownerId = ownerInput.id;
+    const newAnchors = parsed
+      .filter((p) => p.id === ownerId)
+      .map((p) => {
+        const payload = ownerInput.payloadV2!;
+        // url-category force: anchorText = exact Target URL, same defensive rule as
+        // initial generation in processBatchV2.
+        const anchorText = p.category === "url" ? ownerInput.targetUrl : p.anchorText;
+        return {
+          inputId: ownerId,
+          targetUrl: ownerInput.targetUrl,
+          brandId: null,
+          followStatus: null,
+          anchorText,
+          category: p.category,
+          payloadV2: {
+            linkType: p.linkType || payload.linkType,
+            geo: p.geo || payload.geo,
+            lang: p.lang || payload.lang,
+          },
+        };
+      });
+
+    // Apply DB changes: delete plan first, then insert.
+    if (plan.deleteIds.length > 0) await deleteAnchorsByIds(plan.deleteIds);
+    await appendJobAnchors(jobId, newAnchors);
+    added = newAnchors.length;
+  } else if (plan.deleteIds.length > 0) {
+    // Surgical case where the row is over-saturated and only needs trimming.
+    await deleteAnchorsByIds(plan.deleteIds);
+  }
+
+  revalidatePath(`/jobs/${jobId}`);
+  return {
+    ok: true,
+    message: `Rebalanced ${url} / ${linkType}: deleted ${plan.deleteIds.length}, added ${added}.`,
+    url, linkType,
+    deleted: plan.deleteIds.length,
+    added,
+    warnings: plan.warnings,
+  };
+}
+
 async function deleteAnchorsByIds(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const c = await db();
@@ -437,7 +636,20 @@ export async function actionRegenerate(jobId: string, anchorIds: string[]): Prom
 
   let raw: string;
   try {
-    raw = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    raw = result.text;
+    const cost = await computeAiCost({
+      providerId: job.criteria.providerId,
+      model: job.criteria.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+    });
+    await addJobCostAndTokens(jobId, {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      cachedInputTokens: result.usage.cachedInputTokens,
+      costUsd: cost.costUsd,
+    });
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : String(e) };
   }
@@ -448,6 +660,87 @@ export async function actionRegenerate(jobId: string, anchorIds: string[]): Prom
   await updateAnchorsByMap(jobId, parsed.map((p) => ({ id: p.id, anchorText: p.anchorText })));
   revalidatePath(`/jobs/${jobId}`);
   return { ok: true, message: `Regenerated ${parsed.length} anchors.` };
+}
+
+/**
+ * V2 regenerate. Skips url-category anchors entirely — they're locked to the input's
+ * exact Target URL by design, so sending them through the AI is pure token waste (the
+ * result would just be the same Target URL). Returns counts for both the regenerated
+ * and the skipped buckets so the UI can be honest.
+ */
+export async function actionRegenerateV2(
+  jobId: string,
+  anchorIds: string[]
+): Promise<{ ok: boolean; message: string; regenerated: number; skippedUrl: number }> {
+  if (anchorIds.length === 0) return { ok: false, message: "No anchors selected", regenerated: 0, skippedUrl: 0 };
+  const settings = await loadSettings();
+  const job = await getJob(jobId);
+  if (!job) return { ok: false, message: "Job not found", regenerated: 0, skippedUrl: 0 };
+  if (job.version !== 2) return { ok: false, message: "Job is not V2", regenerated: 0, skippedUrl: 0 };
+
+  const targets: JobAnchor[] = (job.anchors ?? []).filter((a) => anchorIds.includes(a.id));
+  if (targets.length === 0) return { ok: false, message: "Selected anchors not found", regenerated: 0, skippedUrl: 0 };
+
+  // Skip url-category anchors. They're already locked to the Target URL by the server-
+  // side enforcement in jobLoop.processBatchV2 — sending them to the AI would just spend
+  // tokens to produce the same string.
+  const aiTargets = targets.filter((a) => a.category !== "url");
+  const skippedUrl = targets.length - aiTargets.length;
+
+  if (aiTargets.length === 0) {
+    return { ok: true, message: `All ${skippedUrl} selected anchors are URL-category — nothing to regenerate (they always equal the Target URL).`, regenerated: 0, skippedUrl };
+  }
+
+  // Each anchor must carry its V2 payload so the prompt can echo linkType/geo/lang.
+  // Fall back to empty payload strings if somehow a legacy row sneaks in (gated on
+  // job.version above, but be defensive).
+  const promptInputs = aiTargets.map((a) => ({
+    id: a.id,
+    targetUrl: a.targetUrl,
+    category: a.category,
+    anchorText: a.anchorText,
+    payloadV2: a.payloadV2 ?? { linkType: "", geo: "", lang: "" },
+  }));
+
+  const prompt = composeRegenerationPromptV2({
+    template: settings.prompts.v2.regeneration,
+    anchors: promptInputs,
+  });
+
+  let raw: string;
+  try {
+    const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    raw = result.text;
+    const cost = await computeAiCost({
+      providerId: job.criteria.providerId,
+      model: job.criteria.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+    });
+    await addJobCostAndTokens(jobId, {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      cachedInputTokens: result.usage.cachedInputTokens,
+      costUsd: cost.costUsd,
+    });
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e), regenerated: 0, skippedUrl };
+  }
+
+  const parsed = parseRegenResponse(raw);
+  if (parsed.length === 0) return { ok: false, message: "AI returned no replacements", regenerated: 0, skippedUrl };
+
+  // Only accept replacements for ids that were actually in our AI-targets set — protects
+  // against the AI hallucinating ids and stomping unrelated anchors.
+  const targetIds = new Set(aiTargets.map((a) => a.id));
+  const updates = parsed.filter((p) => targetIds.has(p.id)).map((p) => ({ id: p.id, anchorText: p.anchorText }));
+
+  await updateAnchorsByMap(jobId, updates);
+  revalidatePath(`/jobs/${jobId}`);
+
+  const msgParts = [`Regenerated ${updates.length} anchor(s).`];
+  if (skippedUrl > 0) msgParts.push(`${skippedUrl} URL-category anchor(s) skipped (always equal to Target URL).`);
+  return { ok: true, message: msgParts.join(" "), regenerated: updates.length, skippedUrl };
 }
 
 // ----- Manual edits -----
@@ -517,6 +810,30 @@ export async function actionPreviewPrompt(args: {
   });
 }
 
+/** V2 preview — composes the V2 prompt for the FIRST batch of the given inputs, using
+ *  the provider's configured target. Shows the user what the AI will actually see on
+ *  batch 1 (including how rows pack and how heavy rows split). */
+export async function actionPreviewPromptV2(args: {
+  inputs: Array<{ targetUrl: string; payloadV2: JobInputPayloadV2 }>;
+  providerId?: ProviderId;
+}): Promise<string> {
+  const settings = await loadSettings();
+  // Synthetic ids so the prompt looks representative without touching the DB.
+  const inputsWithIds = args.inputs.map((i, idx) => ({
+    id: `preview_${idx + 1}`,
+    jobId: "preview",
+    targetUrl: i.targetUrl,
+    title: null,
+    keywords: null,
+    payloadV2: i.payloadV2,
+  }));
+  // Use the provider's effective target so preview matches what the loop will do.
+  const providerId = args.providerId ?? settings.defaults.providerId;
+  const limits = resolveProviderLimits(settings.providers[providerId]);
+  const entries = planBatchV2({ batchIndex: 0, inputs: inputsWithIds, targetAnchorsPerBatch: limits.v2BatchTargetAnchors });
+  return composeGenerationPromptV2({ template: settings.prompts.v2.generation, entries });
+}
+
 // ----- Brand helpers (re-export for client) -----
 
 export async function actionGetBrandsForAnchors(jobId: string): Promise<Brand[]> {
@@ -528,4 +845,109 @@ export async function actionGetBrandsForAnchors(jobId: string): Promise<Brand[]>
 
 export async function actionGetAnchors(ids: string[]): Promise<JobAnchor[]> {
   return getAnchorsByIds(ids);
+}
+
+// ----- Folders & trash (2026-05-24) -----
+//
+// Display-name attribution: the client passes `createdBy` explicitly because server
+// actions can't read localStorage. The DisplayNameProvider gates the UI on first
+// visit so null shouldn't reach these actions in practice — but we accept null
+// (renders as "Unknown") so a broken localStorage doesn't lock the whole feature.
+
+export async function actionCreateFolder(args: { name: string; parentId: string | null }): Promise<{ ok: boolean; id?: string; message?: string }> {
+  const name = (args.name ?? "").trim();
+  if (name.length === 0) return { ok: false, message: "Folder name cannot be empty." };
+  if (name.length > 80) return { ok: false, message: "Folder name is too long (max 80 characters)." };
+  const id = await createFolder({ name, parentId: args.parentId });
+  revalidatePath("/");
+  return { ok: true, id };
+}
+
+export async function actionRenameFolder(id: string, name: string): Promise<{ ok: boolean; message?: string }> {
+  const trimmed = (name ?? "").trim();
+  if (trimmed.length === 0) return { ok: false, message: "Folder name cannot be empty." };
+  if (trimmed.length > 80) return { ok: false, message: "Folder name is too long (max 80 characters)." };
+  await renameFolder(id, trimmed);
+  revalidatePath("/");
+  return { ok: true };
+}
+
+export async function actionMoveFolder(id: string, newParentId: string | null): Promise<{ ok: boolean; message?: string }> {
+  const r = await moveFolder(id, newParentId);
+  if (r.ok) revalidatePath("/");
+  return r;
+}
+
+export async function actionDeleteFolder(id: string): Promise<void> {
+  await softDeleteFolder(id);
+  revalidatePath("/");
+}
+
+export async function actionMoveJobs(jobIds: string[], folderId: string | null): Promise<{ ok: boolean; moved: number }> {
+  if (jobIds.length === 0) return { ok: false, moved: 0 };
+  const moved = await moveJobsToFolder(jobIds, folderId);
+  revalidatePath("/");
+  return { ok: true, moved };
+}
+
+// ----- Trash -----
+
+export async function actionRestoreFolder(id: string): Promise<void> {
+  await restoreFolder(id);
+  revalidatePath("/");
+  revalidatePath("/trash");
+}
+
+export async function actionRestoreJob(id: string): Promise<void> {
+  await restoreJob(id);
+  revalidatePath("/");
+  revalidatePath("/trash");
+}
+
+export async function actionPurgeFolder(id: string): Promise<void> {
+  await purgeFolder(id);
+  revalidatePath("/trash");
+}
+
+export async function actionPurgeJob(id: string): Promise<void> {
+  await purgeJob(id);
+  revalidatePath("/trash");
+}
+
+/**
+ * Hard-delete everything currently in the trash (folders AND jobs). Irreversible.
+ * Jobs are wiped first because they may live inside trashed folders; deleting jobs
+ * cascades to job_inputs and job_anchors via the existing FK ON DELETE CASCADE.
+ * Returns the count of rows removed from each table so the UI can summarise.
+ */
+export async function actionEmptyTrash(): Promise<{ ok: boolean; folders: number; jobs: number }> {
+  const c = await db();
+  const jobsR = await c.execute("DELETE FROM jobs WHERE deleted_at IS NOT NULL");
+  const foldersR = await c.execute("DELETE FROM folders WHERE deleted_at IS NOT NULL");
+  revalidatePath("/trash");
+  return {
+    ok: true,
+    jobs: Number(jobsR.rowsAffected ?? 0),
+    folders: Number(foldersR.rowsAffected ?? 0),
+  };
+}
+
+// ----- Model pricing (2026-05-24) -----
+
+export async function actionListModelPricing(): Promise<ModelPricing[]> {
+  return listModelPricing();
+}
+
+export async function actionSaveModelPricing(p: Omit<ModelPricing, "updatedAt">): Promise<{ ok: boolean; message?: string }> {
+  if (!p.model || !p.model.trim()) return { ok: false, message: "Model name required" };
+  if (!Number.isFinite(p.inputPerMillion) || p.inputPerMillion < 0) return { ok: false, message: "Input rate must be >= 0" };
+  if (!Number.isFinite(p.outputPerMillion) || p.outputPerMillion < 0) return { ok: false, message: "Output rate must be >= 0" };
+  await saveModelPricing({ ...p, model: p.model.trim() });
+  revalidatePath("/settings");
+  return { ok: true };
+}
+
+export async function actionDeleteModelPricing(providerId: ProviderId, model: string): Promise<void> {
+  await deleteModelPricing(providerId, model);
+  revalidatePath("/settings");
 }

@@ -11,18 +11,20 @@
 
 import { loadSettings } from "./settings";
 import {
+  addJobCostAndTokens,
   appendJobAnchors,
   claimOrRefreshRunnerLease,
+  computeAiCost,
   getJob,
   incrementBatchesDone,
   releaseRunnerLease,
   setJobStatus,
 } from "./jobs";
 import { callProvider } from "./providers";
-import { composeGenerationPrompt } from "./anchors/compose";
-import { planBatch } from "./anchors/batchPlan";
+import { composeGenerationPrompt, composeGenerationPromptV2 } from "./anchors/compose";
+import { planBatch, planBatchV2 } from "./anchors/batchPlan";
 import { matchBrand } from "./anchors/brands";
-import { parseAnchorsResponse } from "./anchors/parse";
+import { parseAnchorsResponse, parseAnchorsResponseV2 } from "./anchors/parse";
 import { resolveProviderLimits } from "./providers/limits";
 
 const RATE_LIMIT_HINTS = /rate|429|too many requests|quota/i;
@@ -96,7 +98,11 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
     const settings = await loadSettings();
     const limits = resolveProviderLimits(settings.providers[job.criteria.providerId]);
 
-    const result = await processBatch(jobId, job.batchesDone, runnerId);
+    // V1 and V2 share the orchestration loop (status / rate-limit retry / lease) but
+    // diverge in how a single batch is composed/parsed and what data is persisted.
+    const result = job.version === 2
+      ? await processBatchV2(jobId, job.batchesDone, runnerId)
+      : await processBatch(jobId, job.batchesDone, runnerId);
 
     if (ac.signal.aborted) return;
 
@@ -200,8 +206,11 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
   });
 
   let raw: string;
+  let usage: import("./types").ProviderUsage;
   try {
-    raw = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    raw = result.text;
+    usage = result.usage;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (RATE_LIMIT_HINTS.test(message)) {
@@ -218,6 +227,22 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
     await releaseRunnerLease(jobId, runnerId);
     return { kind: finalStatus, message, anchorsAdded: 0 };
   }
+
+  // Lock in cost for this batch against the pricing row that exists RIGHT NOW. Even if
+  // the AI output is unparseable, we still spent the tokens — record them so the job's
+  // cost reflects real spend. (Drop Sherlock follows the same write-time lock-in pattern.)
+  const cost = await computeAiCost({
+    providerId: job.criteria.providerId,
+    model: job.criteria.model,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+  });
+  await addJobCostAndTokens(jobId, {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+    costUsd: cost.costUsd,
+  });
 
   let parsed: ReturnType<typeof parseAnchorsResponse>;
   try {
@@ -289,4 +314,154 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
     return { kind: "succeeded", message: `Batch ${batchIndex + 1} added ${anchors.length} anchors`, anchorsAdded: anchors.length };
   }
   return { kind: "running", message: `Batch ${batchIndex + 1} added ${anchors.length} anchors`, anchorsAdded: anchors.length };
+}
+
+// =====================================================================
+// V2 batch processor (2026-05-24)
+// Same orchestration contract as processBatch (same BatchKind/ProcessBatchResult),
+// but uses the V2 compose + V2 parser, and persists V2 payload on each anchor.
+// =====================================================================
+
+export async function processBatchV2(jobId: string, batchIndex: number, runnerId: string): Promise<ProcessBatchResult> {
+  const settings = await loadSettings();
+  const job = await getJob(jobId);
+  if (!job) return { kind: "failed", message: "Job not found", anchorsAdded: 0 };
+  if (job.status === "cancelled") return { kind: "cancelled", message: "Cancelled", anchorsAdded: 0 };
+  if (job.status === "paused") return { kind: "paused", message: "Paused", anchorsAdded: 0 };
+
+  const lease = await claimOrRefreshRunnerLease(jobId, runnerId);
+  if (!lease.ok) {
+    return { kind: "lease_lost", message: `Lease held by ${lease.currentRunnerId} (${lease.heartbeatAgeMs}ms ago)`, anchorsAdded: 0 };
+  }
+
+  const inputs = job.inputs ?? [];
+  const existing = job.anchors ?? [];
+
+  // V2 batchSize on the job row holds the TARGET ANCHORS per batch (not rows). The
+  // planner re-walks inputs and packs them until the running anchor total would exceed
+  // the target. Heavy rows are SPLIT across consecutive batches — `entries` may contain
+  // the same input multiple times across batches, each with its own slice of the row's
+  // per-category counts. Deterministic given immutable inputs.
+  const entries = planBatchV2({ batchIndex, inputs, targetAnchorsPerBatch: job.batchSize || 200 });
+
+  // Filter out any entries whose input is missing V2 payload — shouldn't happen for V2
+  // jobs (the form blocks creation without it), but be defensive.
+  const validEntries = entries.filter((e) => e.input.payloadV2 != null);
+
+  if (validEntries.length === 0) {
+    const status = existing.length > 0 ? "succeeded" : "failed";
+    await setJobStatus(jobId, status, { lastError: status === "failed" ? "No batches produced anchors" : null });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: status, message: "No more V2 batches", anchorsAdded: 0 };
+  }
+
+  const prompt = composeGenerationPromptV2({
+    template: settings.prompts.v2.generation,
+    entries: validEntries,
+  });
+
+  let raw: string;
+  let usageV2: import("./types").ProviderUsage;
+  try {
+    const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    raw = result.text;
+    usageV2 = result.usage;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (RATE_LIMIT_HINTS.test(message)) {
+      await setJobStatus(jobId, "running", {
+        lastError: `Rate-limited at batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying with backoff…`,
+      });
+      return { kind: "rate_limited", message, anchorsAdded: 0 };
+    }
+    const finalStatus = existing.length > 0 ? "partial" : "failed";
+    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: finalStatus, message, anchorsAdded: 0 };
+  }
+
+  // Lock in cost for this V2 batch — same pattern as V1.
+  const costV2 = await computeAiCost({
+    providerId: job.criteria.providerId,
+    model: job.criteria.model,
+    inputTokens: usageV2.inputTokens,
+    outputTokens: usageV2.outputTokens,
+  });
+  await addJobCostAndTokens(jobId, {
+    inputTokens: usageV2.inputTokens,
+    outputTokens: usageV2.outputTokens,
+    cachedInputTokens: usageV2.cachedInputTokens,
+    costUsd: costV2.costUsd,
+  });
+
+  let parsed: ReturnType<typeof parseAnchorsResponseV2>;
+  try {
+    parsed = parseAnchorsResponseV2(raw);
+  } catch (e) {
+    const message = `Could not parse AI output: ${e instanceof Error ? e.message : String(e)}`;
+    const finalStatus = existing.length > 0 ? "partial" : "failed";
+    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: finalStatus, message, anchorsAdded: 0 };
+  }
+
+  if (parsed.length === 0) {
+    await incrementBatchesDone(jobId);
+    const isLast = batchIndex + 1 >= job.batchesTotal;
+    if (isLast) {
+      const finalStatus = existing.length > 0 ? "partial" : "failed";
+      await setJobStatus(jobId, finalStatus, { lastError: "Last batch returned no anchors." });
+      await releaseRunnerLease(jobId, runnerId);
+      return { kind: finalStatus, message: "Empty last batch", anchorsAdded: 0 };
+    }
+    return { kind: "running", message: "Empty batch (continuing)", anchorsAdded: 0 };
+  }
+
+  // Map parsed → input by id. URL fallback is intentionally NOT included for V2 because
+  // every entry already has a unique id and V2 inputs commonly share Target URLs across
+  // rows (different Link Types), so URL-based fallback would be ambiguous.
+  // Note: multiple entries in this batch may share the same input.id when a heavy row
+  // got split across sub-batches. The lookup is by input.id (not entry id), so all
+  // sub-batch anchors collapse back onto the right input row — which is what we want.
+  const byId = new Map(validEntries.map((e) => [e.input.id, e.input]));
+  const anchorsToInsert = parsed
+    .map((p) => {
+      const matched = byId.get(p.id);
+      if (!matched) return null;
+      const payload = matched.payloadV2!;
+      // For url-category anchors, FORCE anchorText to the input's exact Target URL,
+      // character-for-character. The AI is repeatedly observed to hallucinate variations
+      // (lordfilmhd.co / lordfilmhd.com / lordfilmhd.net for example.com), so we don't
+      // trust its url-category output at all. Belt-and-suspenders even when the prompt
+      // is explicit. For non-url categories, use the AI's text as-is.
+      const anchorText = p.category === "url" ? matched.targetUrl : p.anchorText;
+      return {
+        inputId: matched.id,
+        targetUrl: matched.targetUrl,
+        brandId: null,
+        followStatus: null,
+        anchorText,
+        category: p.category,
+        // V2 echo-through fields. Prefer what AI returned, fall back to the input's value
+        // so a stripped-output anchor still carries the right metadata.
+        payloadV2: {
+          linkType: p.linkType || payload.linkType,
+          geo: p.geo || payload.geo,
+          lang: p.lang || payload.lang,
+        },
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+
+  await appendJobAnchors(jobId, anchorsToInsert);
+  await incrementBatchesDone(jobId);
+
+  const newBatchesDone = job.batchesDone + 1;
+  const isLastBatch = newBatchesDone >= job.batchesTotal;
+  if (isLastBatch) {
+    await setJobStatus(jobId, "succeeded", { lastError: null });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: "succeeded", message: `V2 batch ${batchIndex + 1} added ${anchorsToInsert.length} anchors`, anchorsAdded: anchorsToInsert.length };
+  }
+  return { kind: "running", message: `V2 batch ${batchIndex + 1} added ${anchorsToInsert.length} anchors`, anchorsAdded: anchorsToInsert.length };
 }

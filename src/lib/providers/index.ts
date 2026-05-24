@@ -1,4 +1,4 @@
-import type { ProviderId, SettingsBlob } from "../types";
+import type { ProviderId, ProviderUsage, SettingsBlob } from "../types";
 import { callOpenAICompatible } from "./openai-compat";
 import { callGemini } from "./gemini";
 import { callGitHubModels } from "./github";
@@ -12,7 +12,12 @@ export interface CallArgs {
   settings: SettingsBlob;
 }
 
-export async function callProvider(args: CallArgs): Promise<string> {
+export interface CallResult {
+  text: string;
+  usage: ProviderUsage;
+}
+
+export async function callProvider(args: CallArgs): Promise<CallResult> {
   const { providerId, settings } = args;
   const cfg = settings.providers[providerId];
   // Vertex has its own credential check (either SA-JSON or apiKey) — let callVertex
@@ -100,7 +105,7 @@ export async function pingProvider(providerId: ProviderId, settings: SettingsBlo
       prompt: 'Reply with the JSON {"ok":true} and nothing else.',
       settings,
     });
-    return { ok: true, message: `OK — model "${model}" responded (${out.slice(0, 80).replace(/\s+/g, " ")}...)` };
+    return { ok: true, message: `OK — model "${model}" responded (${out.text.slice(0, 80).replace(/\s+/g, " ")}...)` };
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : String(e) };
   }

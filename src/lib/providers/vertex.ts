@@ -83,7 +83,12 @@ interface VertexResponse {
   error?: { message?: string; code?: number; status?: string };
 }
 
-export async function callVertex(args: Args): Promise<string> {
+export interface CallResult {
+  text: string;
+  usage: import("../types").ProviderUsage;
+}
+
+export async function callVertex(args: Args): Promise<CallResult> {
   const { model, prompt, timeoutMs } = args;
   const sa = (args.serviceAccountJson ?? "").trim();
   const apiKey = (args.apiKey ?? "").trim();
@@ -157,7 +162,14 @@ export async function callVertex(args: Args): Promise<string> {
   if (typeof content !== "string") {
     throw new Error(`Vertex AI: response missing candidates[0].content.parts[0].text. Raw: ${text.slice(0, 300)}`);
   }
-  return content;
+  return {
+    text: content,
+    usage: {
+      inputTokens: Number(usage?.promptTokenCount ?? 0),
+      outputTokens: Number(usage?.candidatesTokenCount ?? 0),
+      cachedInputTokens: Number(usage?.cachedContentTokenCount ?? 0),
+    },
+  };
 }
 
 /** Free test-connection — lists publisher models without burning quota. Mirrors
