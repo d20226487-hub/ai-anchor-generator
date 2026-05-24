@@ -2,6 +2,7 @@ import type { ProviderId, SettingsBlob } from "../types";
 import { callOpenAICompatible } from "./openai-compat";
 import { callGemini } from "./gemini";
 import { callGitHubModels } from "./github";
+import { callVertex, pingVertex } from "./vertex";
 import { resolveProviderLimits } from "./limits";
 
 export interface CallArgs {
@@ -14,7 +15,11 @@ export interface CallArgs {
 export async function callProvider(args: CallArgs): Promise<string> {
   const { providerId, settings } = args;
   const cfg = settings.providers[providerId];
-  if (!cfg?.apiKey) throw new Error(`No API key configured for ${providerId}. Configure it in Settings.`);
+  // Vertex has its own credential check (either SA-JSON or apiKey) — let callVertex
+  // raise a more informative error if neither is set. All other providers require apiKey.
+  if (providerId !== "vertex" && !cfg?.apiKey) {
+    throw new Error(`No API key configured for ${providerId}. Configure it in Settings.`);
+  }
 
   // Pull the per-provider timeout from advanced settings. Other limits
   // (interBatchDelayMs, maxRateRetries) are applied higher up in the loop, not here.
@@ -42,6 +47,17 @@ export async function callProvider(args: CallArgs): Promise<string> {
   if (providerId === "gemini") {
     return callGemini({ apiKey: cfg.apiKey, model: args.model, prompt: args.prompt, timeoutMs });
   }
+  if (providerId === "vertex") {
+    return callVertex({
+      serviceAccountJson: cfg?.serviceAccountJson,
+      apiKey: cfg?.apiKey,
+      projectId: cfg?.projectId,
+      location: cfg?.location,
+      model: args.model,
+      prompt: args.prompt,
+      timeoutMs,
+    });
+  }
   throw new Error(`Unknown provider: ${providerId}`);
 }
 
@@ -56,11 +72,25 @@ const PING_FALLBACK: Record<ProviderId, string> = {
   openrouter: "openai/gpt-4o-mini",
   github: "openai/gpt-4o-mini",
   gemini: "gemini-2.0-flash",
+  vertex: "gemini-2.0-flash-001",
 };
 
 export async function pingProvider(providerId: ProviderId, settings: SettingsBlob): Promise<{ ok: boolean; message: string }> {
   try {
     const cfg = settings.providers[providerId];
+    // Vertex has a dedicated free "list publisher models" probe (no token cost) — use it
+    // instead of the generic "send a tiny prompt" path so the user can test SA-JSON creds
+    // without spending quota. Mirrors Drop Sherlock's pattern.
+    if (providerId === "vertex") {
+      const { timeoutMs } = resolveProviderLimits(cfg);
+      return await pingVertex({
+        serviceAccountJson: cfg?.serviceAccountJson,
+        apiKey: cfg?.apiKey,
+        projectId: cfg?.projectId,
+        location: cfg?.location,
+        timeoutMs,
+      });
+    }
     if (!cfg?.apiKey) return { ok: false, message: "No API key set" };
     const userModel = settings.defaults.modelByProvider?.[providerId];
     const model = (userModel && userModel.trim()) || PING_FALLBACK[providerId];

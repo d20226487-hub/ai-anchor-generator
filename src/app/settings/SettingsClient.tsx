@@ -18,6 +18,7 @@ const PROVIDERS: { id: ProviderId; label: string; helpUrl: string; hint?: string
   { id: "openrouter", label: "OpenRouter", helpUrl: "https://openrouter.ai/keys", hint: "Models use lowercase hyphenated IDs, e.g. meta-llama/llama-3.3-70b-instruct" },
   { id: "github", label: "GitHub Models", helpUrl: "https://github.com/settings/personal-access-tokens", hint: "Use a fine-grained PAT with the \"Models\" permission (read), or a classic PAT. Models use mixed-case IDs, e.g. meta/Llama-3.3-70B-Instruct" },
   { id: "gemini", label: "Google Gemini", helpUrl: "https://aistudio.google.com/apikey" },
+  { id: "vertex", label: "Google Vertex AI", helpUrl: "https://console.cloud.google.com/vertex-ai", hint: "Two auth modes: paste a Service Account JSON (recommended — enterprise project + region + implicit prompt caching on Gemini 2.5+), or just provide an Express API key. Models use Vertex names, e.g. gemini-2.5-pro" },
 ];
 
 export function SettingsClient({ initial }: { initial: SettingsBlob }) {
@@ -225,14 +226,17 @@ function ProviderCard({
             {hint}
           </p>
         )}
+        {providerId === "vertex" && (
+          <VertexCredsSection cfg={cfg} onChange={onChange} />
+        )}
         <div>
-          <Label>{t("settings.apiKey")}</Label>
+          <Label>{providerId === "vertex" ? t("settings.vertexExpressKey") : t("settings.apiKey")}</Label>
           <div className="flex gap-2 mt-1">
             <Input
               type={show ? "text" : "password"}
               value={cfg.apiKey}
               onChange={(e) => onChange({ ...cfg, apiKey: e.target.value })}
-              placeholder={hasStoredKey ? `•••set (${cfg.apiKeyPreview}) — type to replace` : "sk-…"}
+              placeholder={hasStoredKey ? `•••set (${cfg.apiKeyPreview}) — type to replace` : (providerId === "vertex" ? "AIza…" : "sk-…")}
               autoComplete="off"
             />
             <Button variant="ghost" size="md" onClick={() => setShow((v) => !v)} type="button">
@@ -260,7 +264,7 @@ function ProviderCard({
             </p>
           )}
         </div>
-        {providerId !== "gemini" && (
+        {providerId !== "gemini" && providerId !== "vertex" && (
           <div>
             <Label>{t("settings.baseUrl")}</Label>
             <Input
@@ -276,6 +280,105 @@ function ProviderCard({
         />
       </CardBody>
     </Card>
+  );
+}
+
+/** Vertex-only credentials section — Service Account JSON (textarea + file upload with
+ *  auto-fill of projectId), project ID, region. Shown ABOVE the Express API-key field
+ *  because SA-JSON is the recommended path (unlocks implicit caching on Gemini 2.5+). */
+function VertexCredsSection({
+  cfg,
+  onChange,
+}: {
+  cfg: { apiKey: string; baseUrl?: string; apiKeyPreview?: string | null; advanced?: ProviderAdvanced; serviceAccountJson?: string; serviceAccountJsonPreview?: string | null; projectId?: string; location?: string };
+  onChange: (next: { apiKey: string; baseUrl?: string; apiKeyPreview?: string | null; advanced?: ProviderAdvanced; serviceAccountJson?: string; serviceAccountJsonPreview?: string | null; projectId?: string; location?: string }) => void;
+}) {
+  const { t } = useT();
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const hasStoredSa = !!cfg.serviceAccountJsonPreview && (cfg.serviceAccountJson ?? "") === "";
+
+  function setSaJson(json: string) {
+    // Try to auto-fill projectId from the JSON. Non-fatal if parse fails.
+    let nextProjectId = cfg.projectId;
+    try {
+      const info = JSON.parse(json) as { project_id?: string };
+      if (info.project_id && !cfg.projectId) nextProjectId = info.project_id;
+    } catch { /* ignore — user may be mid-paste */ }
+    onChange({ ...cfg, serviceAccountJson: json, projectId: nextProjectId });
+  }
+
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => setSaJson(String(reader.result ?? ""));
+    reader.readAsText(f);
+    e.target.value = ""; // allow re-selecting the same file later
+  }
+
+  return (
+    <div className="space-y-3 border border-[var(--color-border)] rounded p-3 bg-[var(--color-surface-2)]/30">
+      <div className="flex items-center justify-between">
+        <Label>{t("settings.vertexSaJson")}</Label>
+        <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={onFile} className="hidden" />
+        <Button variant="outline" size="sm" type="button" onClick={() => fileInputRef.current?.click()}>
+          {t("settings.vertexUploadJson")}
+        </Button>
+      </div>
+      <Textarea
+        rows={6}
+        value={cfg.serviceAccountJson ?? ""}
+        onChange={(e) => setSaJson(e.target.value)}
+        placeholder={hasStoredSa
+          ? `${cfg.serviceAccountJsonPreview} — paste new JSON to replace`
+          : '{ "type": "service_account", "project_id": "my-project", "client_email": "svc@my-project.iam.gserviceaccount.com", "private_key": "-----BEGIN PRIVATE KEY-----\\n…" }'}
+        className="font-mono text-xs"
+        autoComplete="off"
+      />
+      {hasStoredSa && (
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] text-[var(--color-text-faint)]">
+            {t("settings.vertexSaStoredHint")}
+          </p>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            onClick={() => onChange({ ...cfg, serviceAccountJson: KEY_CLEAR_SENTINEL, serviceAccountJsonPreview: null })}
+          >
+            <X className="h-3 w-3" /> {t("settings.vertexRemoveSa")}
+          </Button>
+        </div>
+      )}
+      {cfg.serviceAccountJson === KEY_CLEAR_SENTINEL && (
+        <p className="text-[11px] text-[var(--color-warn)]">
+          {t("settings.vertexSaWillRemove")} <button type="button" className="underline" onClick={() => onChange({ ...cfg, serviceAccountJson: "" })}>{t("common.undo")}</button>
+        </p>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <Label className="text-xs">{t("settings.vertexProjectId")}</Label>
+          <Input
+            className="mt-1"
+            value={cfg.projectId ?? ""}
+            placeholder="my-gcp-project"
+            onChange={(e) => onChange({ ...cfg, projectId: e.target.value })}
+          />
+        </div>
+        <div>
+          <Label className="text-xs">{t("settings.vertexLocation")}</Label>
+          <Input
+            className="mt-1"
+            value={cfg.location ?? ""}
+            placeholder="us-central1"
+            onChange={(e) => onChange({ ...cfg, location: e.target.value })}
+          />
+        </div>
+      </div>
+      <p className="text-[11px] text-[var(--color-text-faint)] leading-relaxed">
+        {t("settings.vertexCredsHint")}
+      </p>
+    </div>
   );
 }
 

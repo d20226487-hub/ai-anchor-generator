@@ -17,7 +17,7 @@ import { uid, clamp } from "@/lib/utils";
 import { Eye, Plus, Trash2, Upload, ClipboardPaste } from "lucide-react";
 import { useT } from "@/lib/i18n/I18nProvider";
 
-const PROVIDERS: ProviderId[] = ["openrouter", "github", "gemini"];
+const PROVIDERS: ProviderId[] = ["openrouter", "github", "gemini", "vertex"];
 
 export interface JobFormInitial {
   name: string;

@@ -1,4 +1,4 @@
-export type ProviderId = "openrouter" | "github" | "gemini";
+export type ProviderId = "openrouter" | "github" | "gemini" | "vertex";
 
 export type AnchorCategory = "generic" | "branded" | "keyword" | "url";
 
@@ -122,6 +122,20 @@ export interface ProviderConfig {
   /** Per-provider rate-limit / timeout knobs. All optional — undefined means "use the
    *  default from PROVIDER_LIMIT_DEFAULTS". See src/lib/providers/limits.ts. */
   advanced?: ProviderAdvanced;
+
+  // ----- Vertex AI only (mirrors Drop Sherlock's vertex_ai.py shape) ----------------
+  /** Full Service Account JSON. Redacted on read like apiKey; never shipped to browser
+   *  unless explicitly fetched for editing. Triggers SA-JSON auth mode (enterprise). */
+  serviceAccountJson?: string;
+  /** Transport-only: "...@my-project.iam.gserviceaccount.com" preview so the UI can
+   *  show "•••set ({email}) — paste to replace" without exposing the private key. */
+  serviceAccountJsonPreview?: string | null;
+  /** GCP project ID — auto-filled from the SA JSON's `project_id` on paste; user can
+   *  override. Required for SA-JSON mode. */
+  projectId?: string;
+  /** GCP region, e.g. "us-central1". Required for SA-JSON mode. Defaults to
+   *  "us-central1" in the UI. */
+  location?: string;
 }
 
 /** Sentinel the Settings form sends to explicitly remove a stored API key. */

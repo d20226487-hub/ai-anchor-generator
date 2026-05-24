@@ -7,11 +7,13 @@ export const DEFAULT_SETTINGS: SettingsBlob = {
     openrouter: { apiKey: "", baseUrl: "https://openrouter.ai/api/v1" },
     github: { apiKey: "", baseUrl: "https://models.github.ai/inference" },
     gemini: { apiKey: "" },
+    vertex: { apiKey: "", location: "us-central1" },
   },
   customModels: {
     openrouter: [],
     github: [],
     gemini: [],
+    vertex: [],
   },
   prompts: {
     generation: DEFAULT_GENERATION_PROMPT,
@@ -23,6 +25,7 @@ export const DEFAULT_SETTINGS: SettingsBlob = {
       openrouter: "openai/gpt-4o-mini",
       github: "openai/gpt-4o-mini",
       gemini: "gemini-2.0-flash",
+      vertex: "gemini-2.0-flash-001",
     },
   },
   locale: "en",
@@ -52,6 +55,16 @@ export const PREDEFINED_MODELS: Record<string, string[]> = {
     "gemini-1.5-flash",
     "gemini-1.5-pro",
   ],
+  vertex: [
+    // Gemini 2.5+ on Vertex auto-applies implicit prompt caching ≥1024-token prefixes.
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-001",
+    "gemini-2.0-flash-lite-001",
+    // Anthropic Claude is also served on Vertex with the same generateContent shape.
+    "claude-3-5-sonnet-v2@20241022",
+    "claude-3-5-haiku@20241022",
+  ],
 };
 
 export async function loadSettings(): Promise<SettingsBlob> {
@@ -80,7 +93,29 @@ export function redactSettings(blob: SettingsBlob): SettingsBlob {
     Object.entries(blob.providers).map(([id, cfg]) => {
       const k = cfg.apiKey ?? "";
       const preview = k.length >= 12 ? `${k.slice(0, 6)}…${k.slice(-4)}` : k.length > 0 ? "•••set" : null;
-      const out: ProviderConfig = { apiKey: "", baseUrl: cfg.baseUrl, apiKeyPreview: preview };
+      // Vertex-only: SA-JSON gets its own redacted preview showing the client_email so the
+      // user can tell at a glance which service account is configured.
+      let saPreview: string | null = null;
+      const sa = (cfg.serviceAccountJson ?? "").trim();
+      if (sa) {
+        try {
+          const info = JSON.parse(sa) as { client_email?: string };
+          saPreview = info.client_email ? `•••set (${info.client_email})` : "•••set";
+        } catch {
+          saPreview = "•••set (invalid JSON)";
+        }
+      }
+      const out: ProviderConfig = {
+        apiKey: "",
+        baseUrl: cfg.baseUrl,
+        apiKeyPreview: preview,
+        advanced: cfg.advanced,
+        // Vertex-only fields (undefined for other providers — JSON serialization drops them)
+        serviceAccountJson: "",
+        serviceAccountJsonPreview: saPreview,
+        projectId: cfg.projectId,
+        location: cfg.location,
+      };
       return [id, out];
     })
   ) as SettingsBlob["providers"];
@@ -105,10 +140,22 @@ export function mergeIncomingSettings(incoming: SettingsBlob, stored: SettingsBl
       if (incKey === KEY_CLEAR_SENTINEL) resolved = "";
       else if (incKey === "" && (cur?.apiKey ?? "") !== "") resolved = cur.apiKey;
       else resolved = incKey;
+      // Vertex-only SA-JSON — same secret-merge logic as apiKey: empty incoming = keep
+      // stored; KEY_CLEAR_SENTINEL = explicit removal; otherwise = use incoming.
+      const incSa = inc.serviceAccountJson ?? "";
+      let resolvedSa: string | undefined;
+      if (incSa === KEY_CLEAR_SENTINEL) resolvedSa = "";
+      else if (incSa === "" && (cur?.serviceAccountJson ?? "") !== "") resolvedSa = cur.serviceAccountJson;
+      else resolvedSa = incSa;
       const out: ProviderConfig = {
         apiKey: resolved,
         baseUrl: inc.baseUrl,
-        // strip transport-only field
+        advanced: inc.advanced,
+        // Vertex fields — undefined when the provider doesn't use them, JSON drops them
+        serviceAccountJson: resolvedSa || undefined,
+        projectId: inc.projectId,
+        location: inc.location,
+        // strip transport-only fields (apiKeyPreview, serviceAccountJsonPreview)
       };
       return [id, out];
     })
