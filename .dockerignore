@@ -1,0 +1,51 @@
+# Don't ship the dev artifacts or local data into the build context. Keeping the context
+# small makes builds fast and prevents data.db (which holds plaintext API keys) from ever
+# ending up baked into an image.
+
+# Node + Next build outputs (the image rebuilds these)
+node_modules
+.next
+out
+dist
+build
+
+# Local DB + WAL sidecars — NEVER ship these
+data.db
+data.db-*
+data/*.db
+data/*.db-*
+
+# Logs / debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+.pnpm-debug.log*
+.dev.log
+tsc-output.txt
+
+# Env files — the container reads env from compose, not from baked-in .env
+.env
+.env.*
+
+# Editor / OS / SCM
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+.claude
+
+# Docker artifacts (don't recurse)
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Misc
+README.md
+DEPLOY.md
+*.md
+coverage
+.vercel
+*.tsbuildinfo
+next-env.d.ts
