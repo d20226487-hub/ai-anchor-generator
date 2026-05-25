@@ -87,6 +87,8 @@ Return ONLY a JSON object: { "anchors": [{ "id": string, "anchorText": string }]
 // =====================================================================
 export const DEFAULT_GENERATION_PROMPT_V2 = `You are an expert SEO link-building specialist. Generate natural, varied anchor texts for backlinks.
 
+{{SITE_DESCRIPTION}}
+
 ## Anchor categories
 - url     — the entry's Target URL, EXACTLY as given, character-for-character. DO NOT alter the scheme, host, path, or query. DO NOT invent variations, alternate domains, similar-looking domains, or different TLDs. The anchorText MUST equal the entry's targetUrl field VERBATIM. (The server will overwrite mismatches with the exact targetUrl anyway, but emit the exact string yourself to keep the response clean.)
 - brand   — the brand NAME derived from the Target URL's hostname (e.g. "example.com" → "Example", "example"). Use natural casing variations. NEVER use a different brand or domain than the one in the entry.
@@ -129,6 +131,8 @@ EVERYTHING BELOW THIS LINE IS PER-BATCH — never identical across calls
 Return only the JSON object.`;
 
 export const DEFAULT_REGENERATION_PROMPT_V2 = `You are an expert SEO link-building specialist. Regenerate the listed anchors with fresh, natural variations.
+
+{{SITE_DESCRIPTION}}
 
 ## Constraints
 - Keep the same Target URL, category, linkType, geo, and lang for each anchor (just rewrite the anchorText).

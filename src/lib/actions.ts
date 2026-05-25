@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { loadSettings, mergeIncomingSettings, redactSettings, saveSettings } from "./settings";
 import {
   addJobCostAndTokens,
@@ -116,6 +117,30 @@ export async function actionCreateJob(args: CreateJobArgs): Promise<string> {
   const id = await createJob(args);
   revalidatePath("/");
   return id;
+}
+
+/**
+ * Create a job, kick off generation, and redirect to the job page in ONE server round-trip.
+ *
+ * The server-side redirect() is the load-bearing fix for the "I clicked Generate, the job
+ * ran in the background, but I was never sent to the progress page" bug. Calling
+ * router.push() on the client immediately after an awaited action that ran revalidatePath()
+ * races with the revalidation and is frequently swallowed by the App Router — so the user
+ * sat on /jobs/new while the job silently completed. redirect() navigates reliably.
+ *
+ * A generation-start failure does NOT block the redirect: we still land on the job page,
+ * which surfaces the error and offers Rerun/Resume. redirect() MUST stay outside the
+ * try/catch (it throws NEXT_REDIRECT, which the framework needs to see).
+ */
+export async function actionCreateJobAndStart(args: CreateJobArgs): Promise<never> {
+  const id = await createJob(args);
+  revalidatePath("/");
+  try {
+    await actionStartGeneration(id);
+  } catch (e) {
+    console.error("[actionCreateJobAndStart] generation start failed:", e);
+  }
+  redirect(`/jobs/${id}`);
 }
 
 export async function actionRenameJob(id: string, name: string): Promise<void> {
@@ -526,6 +551,7 @@ export async function actionRebalanceV2Row(
     const prompt = composeGenerationPromptV2({
       template: settings.prompts.v2.generation,
       entries: [entry],
+      siteDescription: job.criteria.siteDescription,
     });
 
     let raw: string;
@@ -705,6 +731,7 @@ export async function actionRegenerateV2(
   const prompt = composeRegenerationPromptV2({
     template: settings.prompts.v2.regeneration,
     anchors: promptInputs,
+    siteDescription: job.criteria.siteDescription,
   });
 
   let raw: string;
@@ -816,6 +843,7 @@ export async function actionPreviewPrompt(args: {
 export async function actionPreviewPromptV2(args: {
   inputs: Array<{ targetUrl: string; payloadV2: JobInputPayloadV2 }>;
   providerId?: ProviderId;
+  siteDescription?: string | null;
 }): Promise<string> {
   const settings = await loadSettings();
   // Synthetic ids so the prompt looks representative without touching the DB.
@@ -831,7 +859,7 @@ export async function actionPreviewPromptV2(args: {
   const providerId = args.providerId ?? settings.defaults.providerId;
   const limits = resolveProviderLimits(settings.providers[providerId]);
   const entries = planBatchV2({ batchIndex: 0, inputs: inputsWithIds, targetAnchorsPerBatch: limits.v2BatchTargetAnchors });
-  return composeGenerationPromptV2({ template: settings.prompts.v2.generation, entries });
+  return composeGenerationPromptV2({ template: settings.prompts.v2.generation, entries, siteDescription: args.siteDescription });
 }
 
 // ----- Brand helpers (re-export for client) -----

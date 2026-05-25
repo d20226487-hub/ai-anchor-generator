@@ -358,6 +358,7 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
   const prompt = composeGenerationPromptV2({
     template: settings.prompts.v2.generation,
     entries: validEntries,
+    siteDescription: job.criteria.siteDescription,
   });
 
   let raw: string;

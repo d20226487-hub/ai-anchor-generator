@@ -54,6 +54,11 @@ export interface JobCriteria {
    *  in single-site mode (UI enforces). For multi-site mode this is ignored — language
    *  is per-brand instead. */
   language: string | null;
+  /** Optional 1-2 sentence description of the site(s) these anchors are for. Passed to
+   *  the AI as "site context" so generated anchors are more relevant/on-topic. Currently
+   *  surfaced in the V2 flow only. Stored inside the criteria JSON blob — no migration.
+   *  null/undefined on jobs created before this field existed. */
+  siteDescription?: string | null;
 }
 
 export interface JobInput {

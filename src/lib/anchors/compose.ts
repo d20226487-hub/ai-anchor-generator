@@ -156,16 +156,36 @@ export function composeRegenerationPrompt(args: RegenArgs): string {
 // V2 compose — CSV-driven, per-row config (2026-05-24)
 // =====================================================================
 
+/**
+ * Inject the job's free-text site description into a composed prompt as a "Site context"
+ * section. If the template carries a `{{SITE_DESCRIPTION}}` placeholder (the current
+ * defaults do), we substitute there; otherwise — e.g. a user customised their template
+ * before this feature existed — we prepend the block so the context still reaches the AI.
+ * Empty/blank description → no section (placeholder collapses to "").
+ */
+function injectSiteDescription(prompt: string, desc: string | null | undefined): string {
+  const trimmed = (desc ?? "").trim();
+  const block = trimmed
+    ? `## Site context\nThe following describes the site(s)/page(s) these backlinks point to. Use it to make the anchors more relevant and on-topic:\n${trimmed}`
+    : "";
+  if (prompt.includes("{{SITE_DESCRIPTION}}")) {
+    return prompt.replaceAll("{{SITE_DESCRIPTION}}", block);
+  }
+  return block ? `${block}\n\n${prompt}` : prompt;
+}
+
 interface ComposeV2Args {
   template: string;
   /** Pre-planned entries for this batch — each carries the input row + the exact per-
    *  category integer counts the AI should produce. Heavy rows appear in multiple
    *  consecutive batches; each batch sees its own slice via exactCounts. */
   entries: V2BatchEntry[];
+  /** Optional job-level site description → injected as a "Site context" section. */
+  siteDescription?: string | null;
 }
 
 export function composeGenerationPromptV2(args: ComposeV2Args): string {
-  const { template, entries } = args;
+  const { template, entries, siteDescription } = args;
 
   const entriesBlock = entries
     .map((e, i) => {
@@ -202,17 +222,20 @@ export function composeGenerationPromptV2(args: ComposeV2Args): string {
     })
     .join("\n");
 
-  return template.replaceAll("{{ENTRIES_BLOCK_V2}}", entriesBlock);
+  const out = template.replaceAll("{{ENTRIES_BLOCK_V2}}", entriesBlock);
+  return injectSiteDescription(out, siteDescription);
 }
 
 interface RegenV2Args {
   template: string;
   /** Anchors to regenerate, must include V2 payload so the prompt can echo through. */
   anchors: Array<Pick<JobAnchor, "id" | "targetUrl" | "category" | "anchorText"> & { payloadV2: { linkType: string; geo: string; lang: string } }>;
+  /** Optional job-level site description → injected as a "Site context" section. */
+  siteDescription?: string | null;
 }
 
 export function composeRegenerationPromptV2(args: RegenV2Args): string {
-  const { template, anchors } = args;
+  const { template, anchors, siteDescription } = args;
   const regenBlock = anchors
     .map((a) => {
       let hostHint = "";
@@ -229,5 +252,6 @@ export function composeRegenerationPromptV2(args: RegenV2Args): string {
       ].join("\n");
     })
     .join("\n");
-  return template.replaceAll("{{REGEN_BLOCK_V2}}", regenBlock);
+  const out = template.replaceAll("{{REGEN_BLOCK_V2}}", regenBlock);
+  return injectSiteDescription(out, siteDescription);
 }

@@ -20,7 +20,7 @@ import {
 import type { RebalanceMode } from "@/lib/anchors/rebalance";
 import { v2AnchorsToCsv } from "@/lib/anchors/csv_v2";
 import { CostPill } from "@/components/CostPill";
-import type { AnchorCategory, Job, JobAnchor, JobInput } from "@/lib/types";
+import { ANCHOR_CATEGORIES, type AnchorCategory, type Job, type JobAnchor, type JobInput } from "@/lib/types";
 import { AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Info, Pause, Pencil, Play, RefreshCw, Search, Trash2, Wand2, X } from "lucide-react";
 import { useT } from "@/lib/i18n/I18nProvider";
 
@@ -76,10 +76,28 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
 
   const anchors = job.anchors ?? [];
 
-  // Filters: text search + pagination only. No dofollow / brand / category filters in V2.
+  // Filters: text search + link-type + anchor-type (category) + pagination.
   const [textFilter, setTextFilter] = React.useState("");
+  const [linkTypeFilter, setLinkTypeFilter] = React.useState<string>("");
+  const [categoryFilter, setCategoryFilter] = React.useState<AnchorCategory | "">("");
   const [pageSize, setPageSize] = React.useState<50 | 100 | 200 | 500 | 1000>(50);
   const [page, setPage] = React.useState(1);
+
+  // Distinct link types present in this job's anchors — drives the Link type dropdown.
+  const linkTypeOptions = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const a of anchors) {
+      const lt = a.payloadV2?.linkType ?? "";
+      if (lt) s.add(lt);
+    }
+    return Array.from(s).sort((a, b) => a.localeCompare(b));
+  }, [anchors]);
+
+  // If a rerun changed the available link types, drop a now-invalid selection so the
+  // table doesn't silently show zero rows against a stale filter value.
+  React.useEffect(() => {
+    if (linkTypeFilter && !linkTypeOptions.includes(linkTypeFilter)) setLinkTypeFilter("");
+  }, [linkTypeOptions, linkTypeFilter]);
 
   // Selection state for the Regenerate flow. Set of anchor ids.
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
@@ -87,16 +105,22 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
 
   const filtered = React.useMemo(() => {
     const q = textFilter.trim().toLowerCase();
-    if (!q) return anchors;
-    return anchors.filter((a) =>
-      a.anchorText.toLowerCase().includes(q) ||
-      a.targetUrl.toLowerCase().includes(q) ||
-      (a.payloadV2?.linkType ?? "").toLowerCase().includes(q) ||
-      (a.payloadV2?.geo ?? "").toLowerCase().includes(q)
-    );
-  }, [anchors, textFilter]);
+    return anchors.filter((a) => {
+      if (linkTypeFilter && (a.payloadV2?.linkType ?? "") !== linkTypeFilter) return false;
+      if (categoryFilter && a.category !== categoryFilter) return false;
+      if (q) {
+        const hit =
+          a.anchorText.toLowerCase().includes(q) ||
+          a.targetUrl.toLowerCase().includes(q) ||
+          (a.payloadV2?.linkType ?? "").toLowerCase().includes(q) ||
+          (a.payloadV2?.geo ?? "").toLowerCase().includes(q);
+        if (!hit) return false;
+      }
+      return true;
+    });
+  }, [anchors, textFilter, linkTypeFilter, categoryFilter]);
 
-  React.useEffect(() => { setPage(1); }, [textFilter, pageSize]);
+  React.useEffect(() => { setPage(1); }, [textFilter, pageSize, linkTypeFilter, categoryFilter]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, pageCount);
@@ -466,6 +490,28 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
                 </button>
               )}
             </div>
+            {linkTypeOptions.length > 0 && (
+              <Select
+                value={linkTypeFilter}
+                onChange={(e) => setLinkTypeFilter(e.target.value)}
+                className="h-9 w-auto"
+                aria-label={t("jobView.anchors.filterLinkType")}
+              >
+                <option value="">{t("jobView.anchors.allLinkTypes")}</option>
+                {linkTypeOptions.map((lt) => <option key={lt} value={lt}>{lt}</option>)}
+              </Select>
+            )}
+            <Select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value as AnchorCategory | "")}
+              className="h-9 w-auto"
+              aria-label={t("jobView.anchors.filterAnchorType")}
+            >
+              <option value="">{t("jobView.anchors.allAnchorTypes")}</option>
+              {ANCHOR_CATEGORIES.map((c) => (
+                <option key={c} value={c}>{t(`form.cat.${c}` as Parameters<typeof t>[0])}</option>
+              ))}
+            </Select>
             <div className="flex items-center gap-1.5 text-xs text-[var(--color-text-dim)]">
               <span>{t("jobsList.pageSize")}</span>
               <Select
@@ -511,6 +557,7 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
                   <th className="px-3 py-2 text-left">{t("jobView.v2cols.url")}</th>
                   <th className="px-3 py-2 text-left w-32">{t("jobView.v2cols.type")}</th>
                   <th className="px-3 py-2 text-left">{t("jobView.v2cols.anchor")}</th>
+                  <th className="px-3 py-2 text-left w-28">{t("jobView.v2cols.anchorType")}</th>
                   <th className="px-3 py-2 text-left w-24">{t("jobView.v2cols.geo")}</th>
                   <th className="px-3 py-2 text-left w-20">{t("jobView.v2cols.lang")}</th>
                 </tr>
@@ -531,6 +578,11 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
                     <td className="px-3 py-2 text-xs text-[var(--color-text-dim)] truncate max-w-[300px]" title={a.targetUrl}>{a.targetUrl}</td>
                     <td className="px-3 py-2 text-xs">{a.payloadV2?.linkType ?? ""}</td>
                     <td className="px-3 py-2">{a.anchorText}</td>
+                    <td className="px-3 py-2">
+                      <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${categoryStyle(a.category)}`}>
+                        {a.category}
+                      </span>
+                    </td>
                     <td className="px-3 py-2 text-xs text-[var(--color-text-dim)]">{a.payloadV2?.geo ?? ""}</td>
                     <td className="px-3 py-2 text-xs text-[var(--color-text-dim)]">{a.payloadV2?.lang ?? ""}</td>
                   </tr>
@@ -1006,4 +1058,12 @@ function formatDuration(ms: number): string {
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   return `${m}m ${s % 60}s`;
+}
+
+/** Category chip colors — mirrors V1's JobView.categoryStyle (per-theme CSS vars). */
+function categoryStyle(c: AnchorCategory): string {
+  if (c === "branded") return "bg-[var(--cat-branded-bg)] text-[var(--cat-branded-fg)]";
+  if (c === "keyword") return "bg-[var(--cat-keyword-bg)] text-[var(--cat-keyword-fg)]";
+  if (c === "url") return "bg-[var(--cat-url-bg)] text-[var(--cat-url-fg)]";
+  return "bg-[var(--cat-generic-bg)] text-[var(--cat-generic-fg)]";
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Card, CardBody, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select, Textarea } from "@/components/ui/Input";
@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { useToast } from "@/components/ui/Toast";
 import { useT } from "@/lib/i18n/I18nProvider";
 import { useDisplayName } from "@/components/DisplayNameProvider";
-import { actionCreateJob, actionPreviewPromptV2, actionStartGeneration } from "@/lib/actions";
+import { actionCreateJobAndStart, actionPreviewPromptV2 } from "@/lib/actions";
 import { parseCsvTextV2, type CsvRowV2 } from "@/lib/anchors/csv_v2";
 import { PREDEFINED_MODELS } from "@/lib/settings";
 import type { ProviderId, SettingsBlob } from "@/lib/types";
@@ -30,7 +30,6 @@ https://example.com,Comment,30,100,0,0,0,Russia,RU
 https://example.com,Profile,5,0,100,0,0,Russia,RU`;
 
 export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const { toast } = useToast();
   const { t, locale } = useT();
@@ -45,6 +44,7 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
     settings.defaults.modelByProvider[settings.defaults.providerId] ?? ""
   );
   const [csvText, setCsvText] = React.useState("");
+  const [siteDescription, setSiteDescription] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
   // Re-parse on every csvText change. Cheap and gives immediate feedback.
@@ -91,6 +91,7 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
     return actionPreviewPromptV2({
       inputs: parsed.rows.map((r) => ({ targetUrl: r.targetUrl, payloadV2: r.payloadV2 })),
       providerId,
+      siteDescription: siteDescription.trim() || null,
     });
   }
 
@@ -112,7 +113,9 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
       // V2 stores per-row payload on inputs. Criteria carries provider/model but the
       // job-level distribution/dofollow fields are ignored by V2 codepaths — they're
       // kept on the object so the V1-shaped DB type still accepts the row.
-      const id = await actionCreateJob({
+      // actionCreateJobAndStart redirects server-side to /jobs/[id]; the previous
+      // client router.push() raced with revalidatePath and was swallowed (the freeze).
+      await actionCreateJobAndStart({
         name: name.trim() || t("common.untitled"),
         mode: "one_site",
         criteria: {
@@ -123,6 +126,7 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
           providerId,
           model,
           language: null,
+          siteDescription: siteDescription.trim() || null,
         },
         inputs: parsed.rows.map((r) => ({
           targetUrl: r.targetUrl,
@@ -134,16 +138,8 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
         createdBy: displayName,
         version: 2,
       });
-      const r = await actionStartGeneration(id);
-      if (r.ok) {
-        toast(t("jobView.toasts.generatingInBatches", { n: r.batchesTotal, plural: r.batchesTotal === 1 ? "" : "es" }), "info");
-      } else {
-        toast(r.message, "error");
-      }
-      router.push(`/jobs/${id}`);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
-    } finally {
       setBusy(false);
     }
   }
@@ -163,9 +159,22 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
             <CardHeader>
               <CardTitle>{t("form.basics")}</CardTitle>
             </CardHeader>
-            <CardBody>
-              <Label>{t("form.jobName")}</Label>
-              <Input className="mt-1" value={name} onChange={(e) => setName(e.target.value)} />
+            <CardBody className="space-y-4">
+              <div>
+                <Label>{t("form.jobName")}</Label>
+                <Input className="mt-1" value={name} onChange={(e) => setName(e.target.value)} />
+              </div>
+              <div>
+                <Label>{t("newJob.v2SiteDescTitle")}</Label>
+                <Textarea
+                  className="mt-1"
+                  rows={3}
+                  value={siteDescription}
+                  onChange={(e) => setSiteDescription(e.target.value)}
+                  placeholder={t("newJob.v2SiteDescPlaceholder")}
+                />
+                <p className="text-[10px] text-[var(--color-text-faint)] mt-1">{t("newJob.v2SiteDescHint")}</p>
+              </div>
             </CardBody>
           </Card>
 

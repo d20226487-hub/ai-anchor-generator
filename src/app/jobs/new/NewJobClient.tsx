@@ -1,18 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useToast } from "@/components/ui/Toast";
+import { useSearchParams } from "next/navigation";
 import { JobForm, type JobFormInitial } from "@/components/JobForm";
-import { actionCreateJob, actionStartGeneration } from "@/lib/actions";
+import { actionCreateJobAndStart } from "@/lib/actions";
 import { useDisplayName } from "@/components/DisplayNameProvider";
 import type { SettingsBlob } from "@/lib/types";
 import { useT } from "@/lib/i18n/I18nProvider";
 
 export function NewJobClient({ settings }: { settings: SettingsBlob }) {
-  const router = useRouter();
   const searchParams = useSearchParams();
-  const { toast } = useToast();
   const { t, locale } = useT();
   const { name: displayName } = useDisplayName();
 
@@ -48,14 +45,9 @@ export function NewJobClient({ settings }: { settings: SettingsBlob }) {
         label: t("newJob.create"),
         busyLabel: t("newJob.creating"),
         onSubmit: async (args) => {
-          const id = await actionCreateJob({ ...args, folderId, createdBy: displayName });
-          const r = await actionStartGeneration(id);
-          if (r.ok) {
-            toast(t("jobView.toasts.generatingInBatches", { n: r.batchesTotal, plural: r.batchesTotal === 1 ? "" : "es" }), "info");
-          } else {
-            toast(r.message, "error");
-          }
-          router.push(`/jobs/${id}`);
+          // Server-side create + start + redirect. See actionCreateJobAndStart for why a
+          // client router.push() here gets swallowed after revalidatePath.
+          await actionCreateJobAndStart({ ...args, folderId, createdBy: displayName });
         },
       }}
     />
