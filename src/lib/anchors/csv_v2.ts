@@ -1,5 +1,5 @@
 import Papa from "papaparse";
-import type { JobInputPayloadV2 } from "../types";
+import type { AnchorCategory, JobInputPayloadV2 } from "../types";
 
 /**
  * V2 CSV input row. Each row is one AI request: generate `numberOfLinks` anchors
@@ -172,10 +172,28 @@ export function parseCsvTextV2(text: string): CsvParseResultV2 {
   return { rows, errors, warnings, skipped };
 }
 
-/** Convert V2 anchors back to CSV using the output shape: URL, Type, Anchor, GEO, Lang. */
-export function v2AnchorsToCsv(anchors: Array<{ targetUrl: string; anchorText: string; payloadV2?: { linkType: string; geo: string; lang: string } | null }>): string {
+/**
+ * Convert V2 anchors back to CSV. Column order matches the V2 results table:
+ * URL, Type (= link type), Anchor, Anchor type (= category), GEO, Lang.
+ * The "Anchor type" column was added 2026-05-25; older exports had 5 columns.
+ */
+export function v2AnchorsToCsv(
+  anchors: Array<{
+    targetUrl: string;
+    anchorText: string;
+    category: AnchorCategory;
+    payloadV2?: { linkType: string; geo: string; lang: string } | null;
+  }>
+): string {
   return Papa.unparse({
-    fields: ["URL", "Type", "Anchor", "GEO", "Lang"],
-    data: anchors.map((a) => [a.targetUrl, a.payloadV2?.linkType ?? "", a.anchorText, a.payloadV2?.geo ?? "", a.payloadV2?.lang ?? ""]),
+    fields: ["URL", "Type", "Anchor", "Anchor type", "GEO", "Lang"],
+    data: anchors.map((a) => [
+      a.targetUrl,
+      a.payloadV2?.linkType ?? "",
+      a.anchorText,
+      a.category,
+      a.payloadV2?.geo ?? "",
+      a.payloadV2?.lang ?? "",
+    ]),
   });
 }

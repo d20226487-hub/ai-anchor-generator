@@ -286,6 +286,7 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
     const csv = v2AnchorsToCsv(anchors.map((a) => ({
       targetUrl: a.targetUrl,
       anchorText: a.anchorText,
+      category: a.category,
       payloadV2: a.payloadV2 ?? { linkType: "", geo: "", lang: "" },
     })));
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -303,6 +304,7 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
     const csv = v2AnchorsToCsv(anchors.map((a) => ({
       targetUrl: a.targetUrl,
       anchorText: a.anchorText,
+      category: a.category,
       payloadV2: a.payloadV2 ?? { linkType: "", geo: "", lang: "" },
     })));
     await navigator.clipboard.writeText(csv);
