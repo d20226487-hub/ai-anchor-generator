@@ -67,24 +67,22 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
 
   const anchors = job.anchors ?? [];
 
-  // Keyword Group = unique-anchor ID. Computed across the full anchor list at
-  // RENDER TIME (not per batch): walk anchors in arrival order, assign group 1
-  // to the first unique anchor text seen (case-insensitive), group 2 to the
-  // next new one, etc. Every subsequent occurrence reuses its number. Max group
-  // number = total UNIQUE anchors. Identical algorithm to csv_pirogi.ts so the
-  // on-screen value always equals the export.
-  const groupByLowered = React.useMemo(() => {
+  // Keyword Group = 1-based row index of the FIRST OCCURRENCE of this anchor
+  // (case-insensitive). Shares the row-index scale with the export's KEYWORD
+  // GROUP helper column so the helper can be used to navigate from a duplicate
+  // back to where the anchor first appeared. Identical algorithm to
+  // csv_pirogi.ts so what's on screen always matches the CSV export.
+  const firstIndexByLowered = React.useMemo(() => {
     const m = new Map<string, number>();
-    let next = 1;
-    for (const a of anchors) {
-      const k = a.anchorText.toLowerCase();
-      if (!m.has(k)) m.set(k, next++);
+    for (let i = 0; i < anchors.length; i++) {
+      const k = anchors[i].anchorText.toLowerCase();
+      if (!m.has(k)) m.set(k, i + 1);
     }
     return m;
   }, [anchors]);
 
   function keywordGroupFor(text: string): string {
-    return `group ${groupByLowered.get(text.toLowerCase()) ?? "?"}`;
+    return `group ${firstIndexByLowered.get(text.toLowerCase()) ?? "?"}`;
   }
 
   const [textFilter, setTextFilter] = React.useState("");

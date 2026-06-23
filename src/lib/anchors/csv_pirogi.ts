@@ -7,22 +7,25 @@ import type { AnchorCategory } from "../types";
  * Layout:
  *   URL | Anchor | Quantity | Language | Country | Keyword Group | Anchor Type | KEYWORD | KEYWORD GROUP
  *
- * - "Keyword Group" = unique-anchor ID. Computed AT EXPORT TIME (not per batch):
- *   walk all rows in arrival order, assign `group 1` to the first unique anchor
- *   text seen (case-insensitive), `group 2` to the next new one, and so on.
- *   Every subsequent occurrence of an already-seen anchor reuses its number.
- *   The max group number therefore equals the total number of unique anchors
- *   across the job, NOT the total row count.
+ * The LEFT "Keyword Group" and RIGHT helper "KEYWORD GROUP" columns share the
+ * same row-index scale so the helper acts as a LOOKUP POINTER:
  *
- *   History: this column previously tried two other schemes — sequential by
- *   unique-count and 1-based first-occurrence row index. The first-occurrence
- *   row index made the value semantically meaningless (it depended on where
- *   the AI happened to emit the row); switched back to a pure unique-anchor ID
- *   on 2026-05-27 per direct user instruction.
- * - "Anchor Type" is the raw category (`generic` / `branded` / `keyword` / `url`).
- * - The last two columns are helper / planning-spreadsheet duplicates:
- *     • KEYWORD       — copy of Anchor (matches the user's source-of-truth sheet).
- *     • KEYWORD GROUP — sequential `group N` per output row (1, 2, 3, ...), no dedup.
+ *   - KEYWORD GROUP (helper) = `group N` where N is this row's 1-based position
+ *     in the export (1, 2, 3, ..., total rows).
+ *   - Keyword Group (LEFT)  = `group N` where N is the row position of the
+ *     FIRST occurrence of this anchor (case-insensitive). When you see LEFT=
+ *     `group 214` at a row where RIGHT=`group 1079`, you scroll up to the row
+ *     where RIGHT=`group 214` and that's where this anchor first appeared.
+ *
+ * Same anchor (case-insensitive) always gets the same LEFT value. Max LEFT
+ * tracks max RIGHT closely (slightly lower if the last few rows are duplicates).
+ *
+ * This is the rule the source spreadsheet uses. Computed at export time across
+ * the complete anchor list — never per-batch.
+ *
+ * History note: briefly tried "sequential unique-anchor ID" (1..unique count) —
+ * that gave a max LEFT much smaller than max RIGHT and broke the lookup
+ * relationship the helper column exists to support. Reverted 2026-05-27.
  */
 export function pirogiAnchorsToCsv(
   anchors: Array<{
@@ -32,19 +35,19 @@ export function pirogiAnchorsToCsv(
     payloadV2?: { linkType: string; geo: string; lang: string; quantity?: number } | null;
   }>
 ): string {
-  // Keyword Group: case-insensitive dedup → sequential `group 1, 2, ...` per UNIQUE anchor.
-  // Computed in arrival order; same anchor (any case) always gets the same number.
-  const groupByLowered = new Map<string, number>();
-  let nextGroup = 1;
+  // Keyword Group: case-insensitive dedup → `group <1-based row index of first occurrence>`.
+  // Uses the same row-index scale as the KEYWORD GROUP helper so the helper can be
+  // used to navigate from a duplicate row back to where the anchor first appeared.
+  const firstIndexByLowered = new Map<string, number>();
   const groupForRow: string[] = new Array(anchors.length);
   for (let i = 0; i < anchors.length; i++) {
     const key = anchors[i].anchorText.toLowerCase();
-    let g = groupByLowered.get(key);
-    if (g === undefined) {
-      g = nextGroup++;
-      groupByLowered.set(key, g);
+    let firstIdx = firstIndexByLowered.get(key);
+    if (firstIdx === undefined) {
+      firstIdx = i + 1;
+      firstIndexByLowered.set(key, firstIdx);
     }
-    groupForRow[i] = `group ${g}`;
+    groupForRow[i] = `group ${firstIdx}`;
   }
 
   return Papa.unparse({
