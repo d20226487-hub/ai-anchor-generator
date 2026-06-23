@@ -61,6 +61,33 @@ function buildFieldLookup(fields: string[]): Map<string, string> {
   return found;
 }
 
+/**
+ * Fix mixed-delimiter pastes: when the header row uses commas (typical "Insert headers"
+ * button output) but data rows use tabs (typical Google Sheets / Excel paste), PapaParse
+ * picks ONE delimiter for the whole file and the other rows fail with "too few fields".
+ * Detect that exact case and normalize the header to tabs so PapaParse auto-detects TSV.
+ *
+ * Conservative — only triggers when:
+ *   1) at least one data line contains a tab,
+ *   2) the header line contains NO tab but contains a comma.
+ * Other shapes (all-comma, all-tab, single-line) are left alone.
+ */
+function normalizeMixedDelimiters(text: string): string {
+  const lines = text.split(/\r?\n/);
+  if (lines.length < 2) return text;
+  const header = lines[0];
+  const dataLines = lines.slice(1).filter((l) => l.trim().length > 0);
+  if (dataLines.length === 0) return text;
+  const dataHasTab = dataLines.some((l) => l.includes("\t"));
+  const headerHasTab = header.includes("\t");
+  const headerHasComma = header.includes(",");
+  if (!dataHasTab || headerHasTab || !headerHasComma) return text;
+  // Replace ", " / "," in the header with a single tab so the header field count
+  // matches the data's tab count.
+  lines[0] = header.replace(/\s*,\s*/g, "\t");
+  return lines.join("\n");
+}
+
 /** Parse "100", "100%", "100 %", "100,5" → number. Returns NaN if not numeric. */
 function parsePct(raw: string): number {
   const cleaned = raw.replace(/[%\s]/g, "").replace(",", ".");
@@ -84,7 +111,9 @@ export function parseCsvTextV2(text: string, opts: { linkTypeRequired?: boolean 
   const linkTypeRequired = opts.linkTypeRequired ?? true;
   const errors: string[] = [];
   const warnings: string[] = [];
-  const parsed = Papa.parse<Record<string, string>>(text.trim(), {
+  // Normalize the common "comma-header + tab-data" mixed-delimiter case before parsing.
+  const normalized = normalizeMixedDelimiters(text.trim());
+  const parsed = Papa.parse<Record<string, string>>(normalized, {
     header: true,
     skipEmptyLines: "greedy",
     transformHeader: (h) => h.trim(),
