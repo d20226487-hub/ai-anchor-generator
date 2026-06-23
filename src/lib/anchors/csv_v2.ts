@@ -74,7 +74,14 @@ function parseInt0(raw: string): number {
   return Number.isInteger(n) ? n : NaN;
 }
 
-export function parseCsvTextV2(text: string): CsvParseResultV2 {
+/**
+ * @param opts.linkTypeRequired - V2 requires Link Type on every row (it's a primary
+ *   axis of the V2 distribution model). Пироги (v3) reuses this parser but doesn't
+ *   care about Link Type — set false to drop the column from the required set AND
+ *   stop erroring on empty per-row values. Defaults to true for V2 back-compat.
+ */
+export function parseCsvTextV2(text: string, opts: { linkTypeRequired?: boolean } = {}): CsvParseResultV2 {
+  const linkTypeRequired = opts.linkTypeRequired ?? true;
   const errors: string[] = [];
   const warnings: string[] = [];
   const parsed = Papa.parse<Record<string, string>>(text.trim(), {
@@ -94,15 +101,19 @@ export function parseCsvTextV2(text: string): CsvParseResultV2 {
   const fields = parsed.meta.fields ?? [];
   const lookup = buildFieldLookup(fields);
 
-  // Required headers must all be present.
-  const REQUIRED_KEYS = ["targetUrl", "linkType", "numberOfLinks", "distUrl", "distBrand", "distGeneric", "distKeyword"] as const;
+  // Required headers must all be present. Link Type joins the required set only in V2.
+  const REQUIRED_KEYS: readonly string[] = linkTypeRequired
+    ? ["targetUrl", "linkType", "numberOfLinks", "distUrl", "distBrand", "distGeneric", "distKeyword"]
+    : ["targetUrl", "numberOfLinks", "distUrl", "distBrand", "distGeneric", "distKeyword"];
   const missing: string[] = [];
   for (const k of REQUIRED_KEYS) if (!lookup.has(k)) missing.push(k);
   if (missing.length) {
+    const expectedHeaders = linkTypeRequired
+      ? "Target URL, Link Type, Number of links, URL, Brand, Generic, Keyword, GEO (optional), Lang (optional)"
+      : "Target URL, Number of links, URL, Brand, Generic, Keyword, Link Type (optional), GEO (optional), Lang (optional)";
     errors.push(
       `Missing required columns: ${missing.join(", ")}. Expected headers (case-insensitive): ` +
-      `Target URL, Link Type, Number of links, URL, Brand, Generic, Keyword, GEO (optional), Lang (optional). ` +
-      `Found: ${fields.join(", ") || "(none)"}`
+      `${expectedHeaders}. Found: ${fields.join(", ") || "(none)"}`
     );
     return { rows: [], errors, warnings, skipped: 0 };
   }
@@ -116,8 +127,11 @@ export function parseCsvTextV2(text: string): CsvParseResultV2 {
     const url = (r[lookup.get("targetUrl")!] ?? "").trim();
     if (!url) { skipped++; continue; }
 
-    const linkType = (r[lookup.get("linkType")!] ?? "").trim();
-    if (!linkType) { errors.push(`${rowNumLabel}: Link Type is required.`); continue; }
+    // Link Type is optional in Пироги mode — lookup may not have a column at all, and
+    // even when it does, an empty cell is acceptable. In V2 we still require it.
+    const linkTypeField = lookup.get("linkType");
+    const linkType = linkTypeField ? (r[linkTypeField] ?? "").trim() : "";
+    if (linkTypeRequired && !linkType) { errors.push(`${rowNumLabel}: Link Type is required.`); continue; }
 
     const n = parseInt0(r[lookup.get("numberOfLinks")!] ?? "");
     if (!Number.isFinite(n) || n <= 0) {

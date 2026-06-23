@@ -317,7 +317,7 @@ export function composeGenerationPromptPirogi(args: ComposePirogiArgs): string {
         `${i + 1}. id: ${input.id}`,
         `   targetUrl: ${input.targetUrl}`,
         `   hostnameForBrand: ${hostHint}`,
-        `   linkType: ${p.linkType}`,
+        `   linkType: ${p.linkType || "(none)"}`,
         `   numberOfLinks: ${p.numberOfLinks}  ← sum of YOUR output quantities for this id MUST equal this`,
         `   exactPerCategoryLinks: { url: ${links.url}, brand: ${links.branded}, generic: ${links.generic}, keyword: ${links.keyword} }  ← sum of quantities WITHIN each category MUST equal these EXACTLY`,
         `   geo: ${p.geo || "(none)"}`,

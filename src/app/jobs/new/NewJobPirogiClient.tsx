@@ -24,9 +24,11 @@ function labelFor(p: ProviderId): string {
     : "Google Vertex AI";
 }
 
-const PIROGI_CSV_PLACEHOLDER = `Target URL,Link Type,Number of links,URL,Brand,Generic,Keyword,GEO,Lang
-https://example1.com,Comments,800,0,75,15,10,Russia,RU
-https://example2.com,Comments,400,0,75,15,10,Russia,RU`;
+// Link Type is OPTIONAL in Пироги (the deliverable CSV drops it). Header and per-row
+// cell may be omitted; the V2 parser is invoked below with linkTypeRequired: false.
+const PIROGI_CSV_PLACEHOLDER = `Target URL,Number of links,URL,Brand,Generic,Keyword,GEO,Lang
+https://example1.com,800,0,75,15,10,Russia,RU
+https://example2.com,400,0,75,15,10,Russia,RU`;
 
 /**
  * Пироги (v3) new-job form. Accepts the same V2 CSV input shape (per-row Link Type,
@@ -52,10 +54,11 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
   const [siteDescription, setSiteDescription] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
-  // V2 parser is reused as-is — Пироги takes the same input shape.
+  // V2 parser is reused with linkTypeRequired: false — Пироги doesn't need Link Type
+  // (the deliverable CSV drops the column). Users can still include it if they want.
   const parsed = React.useMemo(() => {
     if (!csvText.trim()) return { rows: [] as CsvRowV2[], errors: [] as string[], warnings: [] as string[], skipped: 0 };
-    return parseCsvTextV2(csvText);
+    return parseCsvTextV2(csvText, { linkTypeRequired: false });
   }, [csvText]);
 
   function handleProviderChange(p: ProviderId) {
@@ -71,7 +74,9 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
     setCsvText(text);
   }
 
-  /** Side-card summary — totals by Link Type + total numberOfLinks across all rows. */
+  /** Side-card summary — totals by Link Type (skipping empty types) + total
+   *  numberOfLinks across all rows. Пироги often has no Link Type at all, in which
+   *  case the breakdown section hides automatically. */
   const summary = React.useMemo(() => {
     const byLinkType = new Map<string, number>();
     const urls = new Set<string>();
@@ -80,7 +85,8 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
       urls.add(r.targetUrl);
       const n = r.payloadV2.numberOfLinks;
       totalLinks += n;
-      byLinkType.set(r.payloadV2.linkType, (byLinkType.get(r.payloadV2.linkType) ?? 0) + n);
+      const lt = r.payloadV2.linkType.trim();
+      if (lt) byLinkType.set(lt, (byLinkType.get(lt) ?? 0) + n);
     }
     return {
       rowCount: parsed.rows.length,
