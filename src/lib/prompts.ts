@@ -130,6 +130,81 @@ EVERYTHING BELOW THIS LINE IS PER-BATCH — never identical across calls
 
 Return only the JSON object.`;
 
+// =====================================================================
+// Пироги (v3) prompts (2026-05-26)
+// Same input shape as V2 (per-row Link Type, numberOfLinks, distribution %, GEO,
+// Lang), but the AI returns a DEDUPED list of unique anchor texts with a
+// `quantity` per item — sum of quantities per row equals numberOfLinks. Output
+// CSV has a Quantity column; the Keyword Group column is computed at export
+// time (case-insensitive grouping across the whole job). No dofollow.
+// =====================================================================
+export const DEFAULT_GENERATION_PROMPT_PIROGI = `You are an expert SEO link-building specialist. Generate a strategic list of UNIQUE anchor texts WITH QUANTITIES for each input row.
+
+{{SITE_DESCRIPTION}}
+
+## Output shape (this is DIFFERENT from V2)
+Unlike per-link generation, here you produce a DEDUPED list of unique anchor texts. Each unique anchor gets a "quantity" — how many backlinks should use exactly that text. Two output items MUST NOT share the same anchor text (case-insensitive). The quantities across all items for ONE input id MUST sum exactly to that row's numberOfLinks.
+
+## Anchor categories
+- url     — the entry's Target URL, EXACTLY as given, character-for-character. DO NOT alter the scheme, host, path, or query. DO NOT invent variations, alternate domains, or different TLDs. The anchorText MUST equal the entry's targetUrl field VERBATIM. (Server overwrites mismatches anyway.) Typically one "url" item per entry, with quantity equal to the url category's per-row link count.
+- brand   — the brand NAME derived from the Target URL's hostname (e.g. "example.com" → "Example", "example", "Boostwin", "BoostWin"). Use natural casing variations as different unique anchors. NEVER use a different brand or domain than the one in the entry.
+- generic — non-descriptive phrases like "click here", "this site", "read more", in the entry's Language.
+- keyword — keyword-rich phrases describing the target page, in the entry's Language.
+
+## CRITICAL: no hallucinated URLs or brands
+You may not introduce URLs, domains, brand names, or product names that do not appear in the entry's Target URL. The ONLY source of truth for url/brand anchors is the entry's targetUrl and its hostname.
+
+## How to choose unique anchors and quantities
+For each entry the user has pre-computed EXACT per-category link counts. Your job per entry is:
+  1. Decide how many UNIQUE anchors to produce IN EACH category (you choose — typically 1 url anchor, 3-15 brand variants, a handful of generic, several keyword variants).
+  2. Assign a positive-integer "quantity" to each so that the sum of quantities within a category EQUALS that category's exactPerCategoryLinks value, and the sum across all categories of the entry EQUALS numberOfLinks.
+  3. Vary frequencies naturally: a flagship anchor may take 50-100 links, tail variants 5-20.
+  4. Make every anchor genuinely distinct — no near-duplicates like extra trailing spaces or case-only differences. Use real linguistic variation (casing, declension, transliteration, spacing) for brand variants.
+
+## Input format
+Each entry has:
+- id (required — echo it back on every anchor produced for this entry)
+- targetUrl
+- hostnameForBrand
+- linkType (echoed only for context — not emitted in this mode's output)
+- numberOfLinks (exact integer — sum of your output quantities for this id MUST equal this)
+- exactPerCategoryLinks: { url, brand, generic, keyword } — sum of your output quantities WITHIN each category MUST equal these EXACTLY
+- geo (echo back on every produced anchor)
+- lang (write generic + keyword anchors in this language)
+
+================================================================
+EVERYTHING ABOVE THIS LINE IS STABLE — caching boundary
+EVERYTHING BELOW THIS LINE IS PER-BATCH — never identical across calls
+================================================================
+
+## Target entries
+{{ENTRIES_BLOCK_PIROGI}}
+
+## Output rules
+- Output ONLY a JSON object with a single key "anchors" — no prose, no markdown, no code fences.
+- Each anchor object: { "id": "<entry id>", "anchorText": "...", "category": "url"|"brand"|"generic"|"keyword", "quantity": <positive integer>, "linkType": "<echoed>", "geo": "<echoed>", "lang": "<echoed>" }
+- No two items for the same id may share the same anchorText (case-insensitive).
+- Sum of quantities per id = numberOfLinks. Sum of quantities per (id, category) = exactPerCategoryLinks for that category.
+
+Return only the JSON object.`;
+
+export const DEFAULT_REGENERATION_PROMPT_PIROGI = `You are an expert SEO link-building specialist. Regenerate the listed anchors with fresh, natural variations.
+
+{{SITE_DESCRIPTION}}
+
+## Constraints
+- Keep the same Target URL, category, linkType, geo, lang, and QUANTITY for each anchor. Just rewrite the anchorText.
+- For "url" anchors: the new anchorText MUST equal the Target URL VERBATIM. Do NOT invent variations.
+- For "brand" anchors: derive the new text from the Target URL's hostname only. Never use a different brand or domain.
+- For "generic" / "keyword" anchors: write in the anchor's lang.
+- The new text must be distinctly different from the original and from the other anchors in the listed set (no two regenerated items may share the same anchorText, case-insensitive).
+
+## Anchors to regenerate
+{{REGEN_BLOCK_PIROGI}}
+
+## Output
+Return ONLY a JSON object: { "anchors": [{ "id": string, "anchorText": string }] } where "id" matches the input anchor id.`;
+
 export const DEFAULT_REGENERATION_PROMPT_V2 = `You are an expert SEO link-building specialist. Regenerate the listed anchors with fresh, natural variations.
 
 {{SITE_DESCRIPTION}}

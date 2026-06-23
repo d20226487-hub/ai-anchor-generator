@@ -105,16 +105,24 @@ export interface JobAnchorPayloadV2 {
   linkType: string;
   geo: string;
   lang: string;
+  /** Пироги (v3) only: how many backlinks should use this exact anchor text. Sum of
+   *  quantities across all unique anchors for one input row equals that row's
+   *  numberOfLinks. Undefined for V2 anchors (one anchor per row). */
+  quantity?: number;
 }
 
 export type JobStatus = "idle" | "running" | "paused" | "succeeded" | "partial" | "failed" | "cancelled";
 
 /**
- * V2 job version. 1 = legacy flow (dofollow ratio, job-level distribution sliders,
- * brand list, language picker). 2 = CSV-driven flow with per-row distribution,
- * link type, geo, and lang; no dofollow concept. Stored on `jobs.version`.
+ * Job schema version (stored on `jobs.version`).
+ *  1 = legacy form-driven flow (dofollow ratio, job-level distribution sliders, brand list, language picker).
+ *  2 = CSV-driven per-row config: each row carries its own distribution, link type, geo, lang. No dofollow.
+ *  3 = "Пироги" mode (2026-05-26). Same V2 input shape, but the AI returns a DEDUPED list of unique
+ *      anchor texts with a `quantity` per anchor (sum per row = numberOfLinks). Output CSV has a
+ *      Quantity column + a Keyword Group column (case-insensitive grouping computed at export time).
+ *      Uses its own pair of prompt templates (`prompts.pirogi.{generation,regeneration}`).
  */
-export type JobVersion = 1 | 2;
+export type JobVersion = 1 | 2 | 3;
 
 export interface Job {
   id: string;
@@ -249,6 +257,12 @@ export interface SettingsBlob {
     generation: string;
     regeneration: string;
     v2: {
+      generation: string;
+      regeneration: string;
+    };
+    /** Пироги (v3) prompts. Added 2026-05-26 — `mergeSettings` fills defaults on
+     *  blobs that predate this field. */
+    pirogi: {
       generation: string;
       regeneration: string;
     };

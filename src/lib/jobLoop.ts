@@ -21,10 +21,10 @@ import {
   setJobStatus,
 } from "./jobs";
 import { callProvider } from "./providers";
-import { composeGenerationPrompt, composeGenerationPromptV2 } from "./anchors/compose";
-import { planBatch, planBatchV2 } from "./anchors/batchPlan";
+import { composeGenerationPrompt, composeGenerationPromptPirogi, composeGenerationPromptV2 } from "./anchors/compose";
+import { planBatch, planBatchPirogi, planBatchV2 } from "./anchors/batchPlan";
 import { matchBrand } from "./anchors/brands";
-import { parseAnchorsResponse, parseAnchorsResponseV2 } from "./anchors/parse";
+import { parseAnchorsResponse, parseAnchorsResponsePirogi, parseAnchorsResponseV2 } from "./anchors/parse";
 import { resolveProviderLimits } from "./providers/limits";
 
 const RATE_LIMIT_HINTS = /rate|429|too many requests|quota/i;
@@ -98,11 +98,13 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
     const settings = await loadSettings();
     const limits = resolveProviderLimits(settings.providers[job.criteria.providerId]);
 
-    // V1 and V2 share the orchestration loop (status / rate-limit retry / lease) but
-    // diverge in how a single batch is composed/parsed and what data is persisted.
-    const result = job.version === 2
-      ? await processBatchV2(jobId, job.batchesDone, runnerId)
-      : await processBatch(jobId, job.batchesDone, runnerId);
+    // V1, V2, and Пироги share the orchestration loop (status / rate-limit retry /
+    // lease) but diverge in how a single batch is composed/parsed and what data
+    // is persisted.
+    let result: ProcessBatchResult;
+    if (job.version === 3) result = await processBatchPirogi(jobId, job.batchesDone, runnerId);
+    else if (job.version === 2) result = await processBatchV2(jobId, job.batchesDone, runnerId);
+    else result = await processBatch(jobId, job.batchesDone, runnerId);
 
     if (ac.signal.aborted) return;
 
@@ -465,4 +467,137 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
     return { kind: "succeeded", message: `V2 batch ${batchIndex + 1} added ${anchorsToInsert.length} anchors`, anchorsAdded: anchorsToInsert.length };
   }
   return { kind: "running", message: `V2 batch ${batchIndex + 1} added ${anchorsToInsert.length} anchors`, anchorsAdded: anchorsToInsert.length };
+}
+
+// =====================================================================
+// Пироги (v3) batch processor (2026-05-26)
+// Same orchestration contract as processBatch/processBatchV2 — but one input
+// ROW per batch (the AI produces a deduped list of unique anchors with
+// quantities for that single row). Each parsed anchor lands as one job_anchors
+// row with payloadV2 = { linkType, geo, lang, quantity }. Keyword Group is
+// NOT stored — computed at export time from the case-insensitive anchor text
+// across the whole job.
+// =====================================================================
+
+export async function processBatchPirogi(jobId: string, batchIndex: number, runnerId: string): Promise<ProcessBatchResult> {
+  const settings = await loadSettings();
+  const job = await getJob(jobId);
+  if (!job) return { kind: "failed", message: "Job not found", anchorsAdded: 0 };
+  if (job.status === "cancelled") return { kind: "cancelled", message: "Cancelled", anchorsAdded: 0 };
+  if (job.status === "paused") return { kind: "paused", message: "Paused", anchorsAdded: 0 };
+
+  const lease = await claimOrRefreshRunnerLease(jobId, runnerId);
+  if (!lease.ok) {
+    return { kind: "lease_lost", message: `Lease held by ${lease.currentRunnerId} (${lease.heartbeatAgeMs}ms ago)`, anchorsAdded: 0 };
+  }
+
+  const inputs = job.inputs ?? [];
+  const existing = job.anchors ?? [];
+
+  const ownerInput = planBatchPirogi({ batchIndex, inputs });
+  if (!ownerInput || !ownerInput.payloadV2 || (ownerInput.payloadV2.numberOfLinks ?? 0) <= 0) {
+    const status = existing.length > 0 ? "succeeded" : "failed";
+    await setJobStatus(jobId, status, { lastError: status === "failed" ? "No batches produced anchors" : null });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: status, message: "No more Пироги batches", anchorsAdded: 0 };
+  }
+
+  const prompt = composeGenerationPromptPirogi({
+    template: settings.prompts.pirogi.generation,
+    entries: [ownerInput],
+    siteDescription: job.criteria.siteDescription,
+  });
+
+  let raw: string;
+  let usagePirogi: import("./types").ProviderUsage;
+  try {
+    const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    raw = result.text;
+    usagePirogi = result.usage;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (RATE_LIMIT_HINTS.test(message)) {
+      await setJobStatus(jobId, "running", {
+        lastError: `Rate-limited at batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying with backoff…`,
+      });
+      return { kind: "rate_limited", message, anchorsAdded: 0 };
+    }
+    const finalStatus = existing.length > 0 ? "partial" : "failed";
+    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: finalStatus, message, anchorsAdded: 0 };
+  }
+
+  // Lock in cost for this Пироги batch — same write-time pattern as V1/V2.
+  const costPirogi = await computeAiCost({
+    providerId: job.criteria.providerId,
+    model: job.criteria.model,
+    inputTokens: usagePirogi.inputTokens,
+    outputTokens: usagePirogi.outputTokens,
+  });
+  await addJobCostAndTokens(jobId, {
+    inputTokens: usagePirogi.inputTokens,
+    outputTokens: usagePirogi.outputTokens,
+    cachedInputTokens: usagePirogi.cachedInputTokens,
+    costUsd: costPirogi.costUsd,
+  });
+
+  let parsed: ReturnType<typeof parseAnchorsResponsePirogi>;
+  try {
+    parsed = parseAnchorsResponsePirogi(raw);
+  } catch (e) {
+    const message = `Could not parse AI output: ${e instanceof Error ? e.message : String(e)}`;
+    const finalStatus = existing.length > 0 ? "partial" : "failed";
+    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: finalStatus, message, anchorsAdded: 0 };
+  }
+
+  if (parsed.length === 0) {
+    await incrementBatchesDone(jobId);
+    const isLast = batchIndex + 1 >= job.batchesTotal;
+    if (isLast) {
+      const finalStatus = existing.length > 0 ? "partial" : "failed";
+      await setJobStatus(jobId, finalStatus, { lastError: "Last batch returned no anchors." });
+      await releaseRunnerLease(jobId, runnerId);
+      return { kind: finalStatus, message: "Empty last batch", anchorsAdded: 0 };
+    }
+    return { kind: "running", message: "Empty batch (continuing)", anchorsAdded: 0 };
+  }
+
+  // Map back to the single owner input. Anchors with a mismatched id are dropped (AI
+  // hallucination guard). url-category anchors are forced to the input's exact URL,
+  // same defensive rule as V2.
+  const payload = ownerInput.payloadV2;
+  const anchorsToInsert = parsed
+    .filter((p) => p.id === ownerInput.id)
+    .map((p) => {
+      const anchorText = p.category === "url" ? ownerInput.targetUrl : p.anchorText;
+      return {
+        inputId: ownerInput.id,
+        targetUrl: ownerInput.targetUrl,
+        brandId: null,
+        followStatus: null,
+        anchorText,
+        category: p.category,
+        payloadV2: {
+          linkType: p.linkType || payload.linkType,
+          geo: p.geo || payload.geo,
+          lang: p.lang || payload.lang,
+          quantity: p.quantity,
+        },
+      };
+    });
+
+  await appendJobAnchors(jobId, anchorsToInsert);
+  await incrementBatchesDone(jobId);
+
+  const newBatchesDone = job.batchesDone + 1;
+  const isLastBatch = newBatchesDone >= job.batchesTotal;
+  if (isLastBatch) {
+    await setJobStatus(jobId, "succeeded", { lastError: null });
+    await releaseRunnerLease(jobId, runnerId);
+    return { kind: "succeeded", message: `Пироги batch ${batchIndex + 1} added ${anchorsToInsert.length} unique anchors`, anchorsAdded: anchorsToInsert.length };
+  }
+  return { kind: "running", message: `Пироги batch ${batchIndex + 1} added ${anchorsToInsert.length} unique anchors`, anchorsAdded: anchorsToInsert.length };
 }

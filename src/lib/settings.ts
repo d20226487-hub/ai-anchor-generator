@@ -1,8 +1,10 @@
 import { db } from "./db";
 import {
   DEFAULT_GENERATION_PROMPT,
+  DEFAULT_GENERATION_PROMPT_PIROGI,
   DEFAULT_GENERATION_PROMPT_V2,
   DEFAULT_REGENERATION_PROMPT,
+  DEFAULT_REGENERATION_PROMPT_PIROGI,
   DEFAULT_REGENERATION_PROMPT_V2,
 } from "./prompts";
 import { KEY_CLEAR_SENTINEL, type ProviderConfig, type ProviderId, type SettingsBlob } from "./types";
@@ -26,6 +28,10 @@ export const DEFAULT_SETTINGS: SettingsBlob = {
     v2: {
       generation: DEFAULT_GENERATION_PROMPT_V2,
       regeneration: DEFAULT_REGENERATION_PROMPT_V2,
+    },
+    pirogi: {
+      generation: DEFAULT_GENERATION_PROMPT_PIROGI,
+      regeneration: DEFAULT_REGENERATION_PROMPT_PIROGI,
     },
   },
   defaults: {
@@ -190,8 +196,10 @@ function mergeSettings(p: Partial<SettingsBlob>): SettingsBlob {
   if (rawDefaults.model && !rawDefaults.modelByProvider) modelByProvider[providerId] = rawDefaults.model;
 
   // V2 prompts (2026-05-24) — fill defaults on any stored blob that predates V2.
+  // Пироги/v3 prompts (2026-05-26) — same pattern.
   const promptsIn = (p.prompts ?? {}) as Partial<SettingsBlob["prompts"]>;
   const v2In = (promptsIn.v2 ?? {}) as Partial<SettingsBlob["prompts"]["v2"]>;
+  const pirogiIn = (promptsIn.pirogi ?? {}) as Partial<SettingsBlob["prompts"]["pirogi"]>;
   return {
     providers: { ...DEFAULT_SETTINGS.providers, ...(p.providers ?? {}) } as SettingsBlob["providers"],
     customModels: { ...DEFAULT_SETTINGS.customModels, ...(p.customModels ?? {}) } as SettingsBlob["customModels"],
@@ -201,6 +209,10 @@ function mergeSettings(p: Partial<SettingsBlob>): SettingsBlob {
       v2: {
         generation: v2In.generation ?? DEFAULT_SETTINGS.prompts.v2.generation,
         regeneration: v2In.regeneration ?? DEFAULT_SETTINGS.prompts.v2.regeneration,
+      },
+      pirogi: {
+        generation: pirogiIn.generation ?? DEFAULT_SETTINGS.prompts.pirogi.generation,
+        regeneration: pirogiIn.regeneration ?? DEFAULT_SETTINGS.prompts.pirogi.regeneration,
       },
     },
     defaults: { providerId, modelByProvider: modelByProvider as SettingsBlob["defaults"]["modelByProvider"] },

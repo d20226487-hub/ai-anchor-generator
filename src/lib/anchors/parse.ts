@@ -123,3 +123,55 @@ export function parseAnchorsResponseV2(raw: string): ParsedAnchorV2[] {
   }
   return out;
 }
+
+// =====================================================================
+// Пироги (v3) parser (2026-05-26) — JSON envelope { anchors: [{ id, anchorText,
+// category, quantity, linkType, geo, lang }] }. Quantities are positive integers;
+// items sharing the same (id, lowercased anchorText) are merged (quantities summed)
+// — this is the same "same anchor = same group" rule applied at parse time so the
+// AI doesn't break the dedup invariant.
+// =====================================================================
+
+export interface ParsedAnchorPirogi {
+  id: string;
+  anchorText: string;
+  category: AnchorCategory;
+  quantity: number;
+  linkType: string;
+  geo: string;
+  lang: string;
+}
+
+const MAX_QUANTITY_PER_ANCHOR = 100_000; // 6-figure spend per single anchor variant is implausible — cap to keep DB sane.
+
+export function parseAnchorsResponsePirogi(raw: string): ParsedAnchorPirogi[] {
+  const obj = extractJsonObject(raw) as { anchors?: unknown };
+  const arr = Array.isArray(obj.anchors) ? obj.anchors.slice(0, MAX_ANCHORS_PER_RESPONSE) : [];
+  // Dedup map: key = `${id}\x01${anchorText.toLowerCase()}`. Merging here means the
+  // job_anchors table never holds two rows for the same (id, anchor) — keeps Keyword
+  // Group computation simple and matches the "same anchor = same group" rule.
+  const byKey = new Map<string, ParsedAnchorPirogi>();
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const i = item as Record<string, unknown>;
+    const id = typeof i.id === "string" ? i.id.trim().slice(0, MAX_ID_LEN) : "";
+    const anchorText = typeof i.anchorText === "string" ? i.anchorText.trim().slice(0, MAX_ANCHOR_TEXT_LEN) : "";
+    if (!id || !anchorText) continue;
+    let catRaw = typeof i.category === "string" ? i.category.toLowerCase().trim() : "";
+    if (catRaw === "brand") catRaw = "branded";
+    const category = (CATS as string[]).includes(catRaw) ? (catRaw as AnchorCategory) : "generic";
+    const qRaw = typeof i.quantity === "number" ? i.quantity : Number(i.quantity);
+    const quantity = Number.isFinite(qRaw) && qRaw > 0 ? Math.min(Math.round(qRaw), MAX_QUANTITY_PER_ANCHOR) : 1;
+    const linkType = typeof i.linkType === "string" ? i.linkType.trim().slice(0, MAX_PASSTHROUGH_LEN) : "";
+    const geo = typeof i.geo === "string" ? i.geo.trim().slice(0, MAX_PASSTHROUGH_LEN) : "";
+    const lang = typeof i.lang === "string" ? i.lang.trim().slice(0, MAX_PASSTHROUGH_LEN) : "";
+    const key = `${id}\x01${anchorText.toLowerCase()}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.quantity = Math.min(existing.quantity + quantity, MAX_QUANTITY_PER_ANCHOR);
+    } else {
+      byKey.set(key, { id, anchorText, category, quantity, linkType, geo, lang });
+    }
+  }
+  return Array.from(byKey.values());
+}

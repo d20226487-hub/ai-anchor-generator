@@ -255,3 +255,110 @@ export function composeRegenerationPromptV2(args: RegenV2Args): string {
   const out = template.replaceAll("{{REGEN_BLOCK_V2}}", regenBlock);
   return injectSiteDescription(out, siteDescription);
 }
+
+// =====================================================================
+// Пироги (v3) compose — same input shape as V2 but the AI is asked to return a
+// DEDUPED list of unique anchor texts with explicit quantities (2026-05-26).
+// =====================================================================
+
+import type { AnchorCategory } from "../types";
+
+/** Hamilton/largest-remainder rounding from 4 floats summing to `total` into 4 ints. */
+function hamiltonInts4(parts: Record<AnchorCategory, number>, total: number): Record<AnchorCategory, number> {
+  if (total <= 0) return { url: 0, branded: 0, generic: 0, keyword: 0 };
+  const cats: AnchorCategory[] = ["url", "branded", "generic", "keyword"];
+  const sum = cats.reduce((a, k) => a + (parts[k] ?? 0), 0) || 1;
+  const raw = cats.map((k) => ((parts[k] ?? 0) / sum) * total);
+  const floor = raw.map((x) => Math.floor(x));
+  let allocated = floor.reduce((a, b) => a + b, 0);
+  const remainder = raw.map((x, i) => ({ i, rem: x - floor[i] }));
+  remainder.sort((a, b) => b.rem - a.rem);
+  for (const { i } of remainder) {
+    if (allocated >= total) break;
+    floor[i]++;
+    allocated++;
+  }
+  return { url: floor[0], branded: floor[1], generic: floor[2], keyword: floor[3] };
+}
+
+interface ComposePirogiArgs {
+  template: string;
+  /** One entry per Пироги input row — the AI returns deduped anchors+quantities for each. */
+  entries: JobInput[];
+  /** Optional job-level site description → injected as a "Site context" section. */
+  siteDescription?: string | null;
+}
+
+export function composeGenerationPromptPirogi(args: ComposePirogiArgs): string {
+  const { template, entries, siteDescription } = args;
+
+  const entriesBlock = entries
+    .map((input, i) => {
+      const p = input.payloadV2 as JobInputPayloadV2;
+      // Hamilton-round the per-category percentages against numberOfLinks so the AI
+      // gets EXACT integer link counts per category (instead of just %). Same trick
+      // V2 uses internally — guarantees sum equals numberOfLinks.
+      const links = hamiltonInts4(
+        {
+          url: p.distribution.url ?? 0,
+          branded: p.distribution.branded ?? 0,
+          generic: p.distribution.generic ?? 0,
+          keyword: p.distribution.keyword ?? 0,
+        },
+        p.numberOfLinks
+      );
+      let hostHint = "";
+      try {
+        hostHint = new URL(input.targetUrl).hostname.replace(/^www\./i, "");
+      } catch {
+        hostHint = input.targetUrl.replace(/^https?:\/\//i, "").split("/")[0].replace(/^www\./i, "");
+      }
+      const lines = [
+        `${i + 1}. id: ${input.id}`,
+        `   targetUrl: ${input.targetUrl}`,
+        `   hostnameForBrand: ${hostHint}`,
+        `   linkType: ${p.linkType}`,
+        `   numberOfLinks: ${p.numberOfLinks}  ← sum of YOUR output quantities for this id MUST equal this`,
+        `   exactPerCategoryLinks: { url: ${links.url}, brand: ${links.branded}, generic: ${links.generic}, keyword: ${links.keyword} }  ← sum of quantities WITHIN each category MUST equal these EXACTLY`,
+        `   geo: ${p.geo || "(none)"}`,
+        `   lang: ${p.lang || "(none)"}`,
+      ];
+      return lines.join("\n");
+    })
+    .join("\n");
+
+  const out = template.replaceAll("{{ENTRIES_BLOCK_PIROGI}}", entriesBlock);
+  return injectSiteDescription(out, siteDescription);
+}
+
+interface RegenPirogiArgs {
+  template: string;
+  /** Anchors to regenerate. linkType / geo / lang / quantity are echoed in the prompt for context. */
+  anchors: Array<Pick<JobAnchor, "id" | "targetUrl" | "category" | "anchorText"> & {
+    payloadV2: { linkType: string; geo: string; lang: string; quantity?: number };
+  }>;
+  siteDescription?: string | null;
+}
+
+export function composeRegenerationPromptPirogi(args: RegenPirogiArgs): string {
+  const { template, anchors, siteDescription } = args;
+  const regenBlock = anchors
+    .map((a) => {
+      let hostHint = "";
+      try { hostHint = new URL(a.targetUrl).hostname.replace(/^www\./i, ""); } catch { /* keep empty */ }
+      return [
+        `- id: ${a.id}`,
+        `  targetUrl: ${a.targetUrl}`,
+        `  hostnameForBrand: ${hostHint}`,
+        `  category: ${a.category}`,
+        `  linkType: ${a.payloadV2.linkType}`,
+        `  geo: ${a.payloadV2.geo}`,
+        `  lang: ${a.payloadV2.lang}`,
+        `  quantity: ${a.payloadV2.quantity ?? 1}  ← keep the same quantity; only the anchorText changes`,
+        `  current: ${a.anchorText}`,
+      ].join("\n");
+    })
+    .join("\n");
+  const out = template.replaceAll("{{REGEN_BLOCK_PIROGI}}", regenBlock);
+  return injectSiteDescription(out, siteDescription);
+}

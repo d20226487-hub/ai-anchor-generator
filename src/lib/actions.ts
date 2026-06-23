@@ -39,13 +39,14 @@ import {
 } from "./jobs";
 import { isLoopRunning, runJobLoop, stopJobLoop } from "./jobLoop";
 import { pingProvider, callProvider } from "./providers";
-import { composeGenerationPrompt, composeGenerationPromptV2, composeRegenerationPrompt, composeRegenerationPromptV2 } from "./anchors/compose";
-import { planBatches, planBatchesV2, planBatchV2 } from "./anchors/batchPlan";
+import { composeGenerationPrompt, composeGenerationPromptPirogi, composeGenerationPromptV2, composeRegenerationPrompt, composeRegenerationPromptPirogi, composeRegenerationPromptV2 } from "./anchors/compose";
+import { planBatches, planBatchesPirogi, planBatchesV2, planBatchV2 } from "./anchors/batchPlan";
 import { resolveProviderLimits } from "./providers/limits";
 import { planRebalance, planRebalanceV2, type RebalanceMode } from "./anchors/rebalance";
 import { brandKeyOf as brandKeyForAnchor, brandKeyOf, matchBrand } from "./anchors/brands";
 import { db } from "./db";
 import { parseAnchorsResponse, parseAnchorsResponseV2, parseRegenResponse } from "./anchors/parse";
+import type { JobInput } from "./types";
 import { quickFixDofollowRatio } from "./anchors/quickfix";
 import type { Brand, JobCriteria, JobInputPayloadV2, JobMode, Locale, ModelPricing, ProviderId, SettingsBlob, Theme, JobAnchor } from "./types";
 import { uid } from "./utils";
@@ -109,8 +110,8 @@ export interface CreateJobArgs {
   folderId?: string | null;
   /** Display-name attribution from the browser. The Settings modal blocks the UI until set. */
   createdBy?: string | null;
-  /** Job version. 1 = legacy flow (default). 2 = CSV-driven per-row config. */
-  version?: 1 | 2;
+  /** Job version. 1 = legacy form-driven (default). 2 = V2 CSV per-row config. 3 = Пироги (deduped anchors with quantities). */
+  version?: 1 | 2 | 3;
 }
 
 export async function actionCreateJob(args: CreateJobArgs): Promise<string> {
@@ -210,10 +211,13 @@ export async function actionStartGeneration(
 
   // V1 chunks by INPUT count (10 rows/batch). V2 chunks by ANCHOR count — pack rows
   // (and split heavy rows) until each AI call asks for ~v2BatchTargetAnchors anchors.
-  // The target is per-provider (Settings → Advanced → "V2 batch target"). Caller can
-  // override via opts.batchInputSize for testing.
+  // Пироги (v3) chunks by INPUT count too, but ALWAYS one row per batch (the AI's job
+  // per row is to produce a deduped list of unique anchors with quantities — bounded
+  // and self-contained regardless of numberOfLinks).
   let planned;
-  if (job.version === 2) {
+  if (job.version === 3) {
+    planned = planBatchesPirogi(inputs);
+  } else if (job.version === 2) {
     const target = opts.batchInputSize
       ?? resolveProviderLimits(await loadSettings().then((s) => s.providers[job.criteria.providerId])).v2BatchTargetAnchors;
     planned = planBatchesV2(inputs, target);
@@ -860,6 +864,114 @@ export async function actionPreviewPromptV2(args: {
   const limits = resolveProviderLimits(settings.providers[providerId]);
   const entries = planBatchV2({ batchIndex: 0, inputs: inputsWithIds, targetAnchorsPerBatch: limits.v2BatchTargetAnchors });
   return composeGenerationPromptV2({ template: settings.prompts.v2.generation, entries, siteDescription: args.siteDescription });
+}
+
+/**
+ * Пироги preview — composes the prompt for the FIRST input row of the given set.
+ * The Пироги planner always batches one row per AI call, so showing the first row's
+ * prompt is exactly what the live AI call will see for batch 0.
+ */
+export async function actionPreviewPromptPirogi(args: {
+  inputs: Array<{ targetUrl: string; payloadV2: JobInputPayloadV2 }>;
+  siteDescription?: string | null;
+}): Promise<string> {
+  const settings = await loadSettings();
+  if (args.inputs.length === 0) {
+    return composeGenerationPromptPirogi({
+      template: settings.prompts.pirogi.generation,
+      entries: [],
+      siteDescription: args.siteDescription,
+    });
+  }
+  // Preview the first row only — mirrors the planner's one-row-per-batch behaviour.
+  const first = args.inputs[0];
+  const entry: JobInput = {
+    id: "preview_1",
+    jobId: "preview",
+    targetUrl: first.targetUrl,
+    title: null,
+    keywords: null,
+    payloadV2: first.payloadV2,
+  };
+  return composeGenerationPromptPirogi({
+    template: settings.prompts.pirogi.generation,
+    entries: [entry],
+    siteDescription: args.siteDescription,
+  });
+}
+
+/**
+ * Пироги regenerate — rewrites the anchorText of selected anchors, keeping their
+ * quantity, category, linkType, geo, lang, and Keyword Group intact (group is
+ * recomputed at export time based on case-insensitive anchor text, so the AI's
+ * new text will naturally join a new or existing group). url-category anchors are
+ * skipped (they're locked to the Target URL by design).
+ */
+export async function actionRegeneratePirogi(
+  jobId: string,
+  anchorIds: string[]
+): Promise<{ ok: boolean; message: string; regenerated: number; skippedUrl: number }> {
+  if (anchorIds.length === 0) return { ok: false, message: "No anchors selected", regenerated: 0, skippedUrl: 0 };
+  const settings = await loadSettings();
+  const job = await getJob(jobId);
+  if (!job) return { ok: false, message: "Job not found", regenerated: 0, skippedUrl: 0 };
+  if (job.version !== 3) return { ok: false, message: "Job is not Пироги (v3)", regenerated: 0, skippedUrl: 0 };
+
+  const targets: JobAnchor[] = (job.anchors ?? []).filter((a) => anchorIds.includes(a.id));
+  if (targets.length === 0) return { ok: false, message: "Selected anchors not found", regenerated: 0, skippedUrl: 0 };
+
+  const aiTargets = targets.filter((a) => a.category !== "url");
+  const skippedUrl = targets.length - aiTargets.length;
+  if (aiTargets.length === 0) {
+    return { ok: true, message: `All ${skippedUrl} selected anchors are URL-category — nothing to regenerate.`, regenerated: 0, skippedUrl };
+  }
+
+  const promptInputs = aiTargets.map((a) => ({
+    id: a.id,
+    targetUrl: a.targetUrl,
+    category: a.category,
+    anchorText: a.anchorText,
+    payloadV2: a.payloadV2 ?? { linkType: "", geo: "", lang: "" },
+  }));
+
+  const prompt = composeRegenerationPromptPirogi({
+    template: settings.prompts.pirogi.regeneration,
+    anchors: promptInputs,
+    siteDescription: job.criteria.siteDescription,
+  });
+
+  let raw: string;
+  try {
+    const result = await callProvider({ providerId: job.criteria.providerId, model: job.criteria.model, prompt, settings });
+    raw = result.text;
+    const cost = await computeAiCost({
+      providerId: job.criteria.providerId,
+      model: job.criteria.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+    });
+    await addJobCostAndTokens(jobId, {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      cachedInputTokens: result.usage.cachedInputTokens,
+      costUsd: cost.costUsd,
+    });
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e), regenerated: 0, skippedUrl };
+  }
+
+  const parsed = parseRegenResponse(raw);
+  if (parsed.length === 0) return { ok: false, message: "AI returned no replacements", regenerated: 0, skippedUrl };
+
+  const targetIds = new Set(aiTargets.map((a) => a.id));
+  const updates = parsed.filter((p) => targetIds.has(p.id)).map((p) => ({ id: p.id, anchorText: p.anchorText }));
+
+  await updateAnchorsByMap(jobId, updates);
+  revalidatePath(`/jobs/${jobId}`);
+
+  const msgParts = [`Regenerated ${updates.length} anchor(s).`];
+  if (skippedUrl > 0) msgParts.push(`${skippedUrl} URL-category anchor(s) skipped.`);
+  return { ok: true, message: msgParts.join(" "), regenerated: updates.length, skippedUrl };
 }
 
 // ----- Brand helpers (re-export for client) -----

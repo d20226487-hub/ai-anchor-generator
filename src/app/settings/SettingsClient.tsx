@@ -10,8 +10,10 @@ import { actionSaveSettings, actionTestProvider } from "@/lib/actions";
 import { PREDEFINED_MODELS } from "@/lib/settings";
 import {
   DEFAULT_GENERATION_PROMPT,
+  DEFAULT_GENERATION_PROMPT_PIROGI,
   DEFAULT_GENERATION_PROMPT_V2,
   DEFAULT_REGENERATION_PROMPT,
+  DEFAULT_REGENERATION_PROMPT_PIROGI,
   DEFAULT_REGENERATION_PROMPT_V2,
 } from "@/lib/prompts";
 import { PricingTab } from "./PricingTab";
@@ -136,6 +138,27 @@ export function SettingsClient({ initial }: { initial: SettingsBlob }) {
               value={s.prompts.v2.regeneration}
               onChange={(v) => setS({ ...s, prompts: { ...s.prompts, v2: { ...s.prompts.v2, regeneration: v } } })}
               defaultValue={DEFAULT_REGENERATION_PROMPT_V2}
+            />
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-baseline gap-2">
+              <h3 className="text-sm font-semibold uppercase tracking-wider">{t("settings.promptsPirogiHeading")}</h3>
+              <span className="text-xs text-[var(--color-text-dim)]">{t("settings.promptsPirogiDesc")}</span>
+            </div>
+            <PromptCard
+              title={t("settings.promptGeneration")}
+              description="Пироги generation prompt — receives ENTRIES_BLOCK_PIROGI (per-row numberOfLinks + Hamilton-rounded exactPerCategoryLinks + linkType + geo + lang). The AI returns a deduped list of unique anchors with quantities per row."
+              value={s.prompts.pirogi.generation}
+              onChange={(v) => setS({ ...s, prompts: { ...s.prompts, pirogi: { ...s.prompts.pirogi, generation: v } } })}
+              defaultValue={DEFAULT_GENERATION_PROMPT_PIROGI}
+            />
+            <PromptCard
+              title={t("settings.promptRegeneration")}
+              description="Пироги regeneration prompt — receives REGEN_BLOCK_PIROGI (per-anchor category + linkType + geo + lang + quantity + current text). Only the anchorText changes; quantity and Keyword Group are preserved."
+              value={s.prompts.pirogi.regeneration}
+              onChange={(v) => setS({ ...s, prompts: { ...s.prompts, pirogi: { ...s.prompts.pirogi, regeneration: v } } })}
+              defaultValue={DEFAULT_REGENERATION_PROMPT_PIROGI}
             />
           </div>
         </TabsContent>

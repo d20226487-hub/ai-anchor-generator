@@ -272,3 +272,29 @@ export function planBatchV2(args: {
   const batches = computeBatches(inputs, target);
   return batches[batchIndex] ?? [];
 }
+
+// =====================================================================
+// Пироги (v3) batching (2026-05-26)
+// Pirogi asks the AI for a DEDUPED list of unique anchor texts + quantities per
+// input row. Per-batch payload size depends on the number of UNIQUE anchors the
+// AI decides to produce (which scales roughly with log(numberOfLinks), not with
+// numberOfLinks itself). So we batch ONE INPUT ROW per AI call — predictable
+// memory, easier failure isolation, and each row's "produce 10-80 unique anchors
+// with quantities summing to N" is a self-contained task for the model.
+//
+// `batch_size` for Пироги stores 1 (rows per batch). `batches_total` = number of
+// input rows with payloadV2 + numberOfLinks > 0.
+// =====================================================================
+
+/** Number of batches for a Пироги run — one per input row that has a positive numberOfLinks. */
+export function planBatchesPirogi(inputs: JobInput[]): BatchPlan {
+  const eligible = inputs.filter((i) => (i.payloadV2?.numberOfLinks ?? 0) > 0);
+  return { batchSize: 1, batchesTotal: Math.max(1, eligible.length) };
+}
+
+/** Return the single input row that belongs to this batch index. */
+export function planBatchPirogi(args: { batchIndex: number; inputs: JobInput[] }): JobInput | null {
+  const { batchIndex, inputs } = args;
+  const eligible = inputs.filter((i) => (i.payloadV2?.numberOfLinks ?? 0) > 0);
+  return eligible[batchIndex] ?? null;
+}
