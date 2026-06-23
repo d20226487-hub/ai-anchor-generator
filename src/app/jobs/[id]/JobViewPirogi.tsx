@@ -16,7 +16,7 @@ import {
   actionRenameJob,
   actionStartGeneration,
 } from "@/lib/actions";
-import { pirogiAnchorsToCsv } from "@/lib/anchors/csv_pirogi";
+import { computePirogiKeywordGroups, pirogiAnchorsToCsv } from "@/lib/anchors/csv_pirogi";
 import { CostPill } from "@/components/CostPill";
 import { ANCHOR_CATEGORIES, type AnchorCategory, type Job } from "@/lib/types";
 import { AlertTriangle, ChevronLeft, ChevronRight, Copy, Download, Info, Pause, Pencil, Play, RefreshCw, Search, Trash2, Wand2, X } from "lucide-react";
@@ -67,22 +67,18 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
 
   const anchors = job.anchors ?? [];
 
-  // Keyword Group = 1-based row index of the FIRST OCCURRENCE of this anchor
-  // (case-insensitive). Shares the row-index scale with the export's KEYWORD
-  // GROUP helper column so the helper can be used to navigate from a duplicate
-  // back to where the anchor first appeared. Identical algorithm to
-  // csv_pirogi.ts so what's on screen always matches the CSV export.
-  const firstIndexByLowered = React.useMemo(() => {
-    const m = new Map<string, number>();
-    for (let i = 0; i < anchors.length; i++) {
-      const k = anchors[i].anchorText.toLowerCase();
-      if (!m.has(k)) m.set(k, i + 1);
-    }
+  // Keyword Group = unique-anchor id (1..unique count), same anchor → same number.
+  // Reuses the EXACT helper the CSV export uses (computePirogiKeywordGroups) so the
+  // on-screen value can never drift from the exported value. Map anchor id → label.
+  const groupByAnchorId = React.useMemo(() => {
+    const labels = computePirogiKeywordGroups(anchors.map((a) => a.anchorText));
+    const m = new Map<string, string>();
+    anchors.forEach((a, i) => m.set(a.id, labels[i]));
     return m;
   }, [anchors]);
 
-  function keywordGroupFor(text: string): string {
-    return `group ${firstIndexByLowered.get(text.toLowerCase()) ?? "?"}`;
+  function keywordGroupFor(anchorId: string): string {
+    return groupByAnchorId.get(anchorId) ?? "group ?";
   }
 
   const [textFilter, setTextFilter] = React.useState("");
@@ -453,7 +449,7 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
                     <td className="px-3 py-2 text-right font-mono tabular-nums">{a.payloadV2?.quantity ?? 1}</td>
                     <td className="px-3 py-2 text-xs text-[var(--color-text-dim)]">{a.payloadV2?.lang ?? ""}</td>
                     <td className="px-3 py-2 text-xs text-[var(--color-text-dim)]">{a.payloadV2?.geo ?? ""}</td>
-                    <td className="px-3 py-2 text-xs text-[var(--color-text-dim)]">{keywordGroupFor(a.anchorText)}</td>
+                    <td className="px-3 py-2 text-xs text-[var(--color-text-dim)]">{keywordGroupFor(a.id)}</td>
                     <td className="px-3 py-2">
                       <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${categoryStyle(a.category)}`}>
                         {a.category}
