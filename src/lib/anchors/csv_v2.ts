@@ -216,6 +216,36 @@ export function parseCsvTextV2(text: string, opts: { linkTypeRequired?: boolean 
 }
 
 /**
+ * Convert V2 / Пироги inputs back to the CSV form the user would have pasted.
+ * Used by the edit pages to pre-fill the CSV textarea with the job's current rows.
+ * Emits all 9 V2 columns even if Link Type / GEO / Lang are empty — the parser
+ * accepts that, and seeing the empty columns reminds the user the slots exist.
+ */
+export function v2InputsToCsv(
+  inputs: Array<{ targetUrl: string; payloadV2?: JobInputPayloadV2 | null }>
+): string {
+  if (inputs.length === 0) return "";
+  return Papa.unparse({
+    fields: ["Target URL", "Link Type", "Number of links", "URL", "Brand", "Generic", "Keyword", "GEO", "Lang"],
+    data: inputs.map((i) => {
+      const p = i.payloadV2;
+      if (!p) return [i.targetUrl, "", "", "0", "0", "0", "0", "", ""];
+      return [
+        i.targetUrl,
+        p.linkType,
+        String(p.numberOfLinks),
+        String(p.distribution.url ?? 0),
+        String(p.distribution.branded ?? 0),
+        String(p.distribution.generic ?? 0),
+        String(p.distribution.keyword ?? 0),
+        p.geo,
+        p.lang,
+      ];
+    }),
+  });
+}
+
+/**
  * Convert V2 anchors back to CSV. Column order matches the V2 results table:
  * URL, Type (= link type), Anchor, Anchor type (= category), GEO, Lang.
  * The "Anchor type" column was added 2026-05-25; older exports had 5 columns.

@@ -155,7 +155,8 @@ export interface UpdateJobArgs {
   name: string;
   mode: JobMode;
   criteria: JobCriteria;
-  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null }>;
+  /** V1 jobs use just targetUrl/title/keywords; V2 and Пироги carry per-row payloadV2. */
+  inputs: Array<{ targetUrl: string; title: string | null; keywords: string | null; payloadV2?: JobInputPayloadV2 | null }>;
 }
 
 export async function actionUpdateJob(args: UpdateJobArgs): Promise<void> {

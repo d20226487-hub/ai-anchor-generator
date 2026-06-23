@@ -219,6 +219,7 @@ const en = {
   },
   editJob: {
     heading: "Edit job: {name}",
+    headingPirogi: "Edit Пироги job: {name}",
     sub: "Update criteria or inputs. Saving alone keeps existing anchors; Save & rerun replaces them with a fresh AI generation.",
     saveAndRerun: "Save & rerun",
     saveAndRerunBusy: "Saving…",
@@ -742,6 +743,7 @@ const ru: typeof en = {
   },
   editJob: {
     heading: "Редактирование задачи: {name}",
+    headingPirogi: "Редактирование задачи Пироги: {name}",
     sub: "Обновите критерии или входные данные. «Сохранить» оставит существующие анкоры; «Сохранить и перезапустить» заменит их новой генерацией.",
     saveAndRerun: "Сохранить и перезапустить",
     saveAndRerunBusy: "Сохранение…",
