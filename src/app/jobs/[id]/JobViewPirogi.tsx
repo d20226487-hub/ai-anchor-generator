@@ -67,20 +67,21 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
 
   const anchors = job.anchors ?? [];
 
-  // Keyword Group: case-insensitive dedup sequential, computed from arrival order.
-  // Same algorithm as csv_pirogi.ts so the on-screen value matches the export.
-  const groupByLowered = React.useMemo(() => {
+  // Keyword Group: case-insensitive dedup → label = `group <1-based row index of first
+  // occurrence>`. Matches the source spreadsheet's convention and csv_pirogi.ts so the
+  // on-screen value equals the export. Fixed 2026-05-27 — earlier sequential numbering
+  // made the on-screen max much lower than the helper KEYWORD GROUP column.
+  const firstIndexByLowered = React.useMemo(() => {
     const m = new Map<string, number>();
-    let next = 1;
-    for (const a of anchors) {
-      const k = a.anchorText.toLowerCase();
-      if (!m.has(k)) m.set(k, next++);
+    for (let i = 0; i < anchors.length; i++) {
+      const k = anchors[i].anchorText.toLowerCase();
+      if (!m.has(k)) m.set(k, i + 1);
     }
     return m;
   }, [anchors]);
 
   function keywordGroupFor(text: string): string {
-    return `group ${groupByLowered.get(text.toLowerCase()) ?? "?"}`;
+    return `group ${firstIndexByLowered.get(text.toLowerCase()) ?? "?"}`;
   }
 
   const [textFilter, setTextFilter] = React.useState("");
