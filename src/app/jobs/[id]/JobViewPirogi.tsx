@@ -39,6 +39,9 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
   const [busy, setBusy] = React.useState(false);
   const [renaming, setRenaming] = React.useState(false);
   const [name, setName] = React.useState(job.name);
+  // Whether the CSV export / copy includes a "Link Type" column (inserted after URL).
+  // Default on so the link type the user provided in the input isn't silently dropped.
+  const [includeLinkType, setIncludeLinkType] = React.useState(true);
 
   // Stuck-loop detection — same pattern as V2.
   const [stuckHintShown, setStuckHintShown] = React.useState(false);
@@ -193,13 +196,21 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
     await actionDeleteJob(job.id);
     router.push("/");
   }
+  // Build the CSV once; export + copy share it so they always match. The Link Type
+  // column is included per the header toggle.
+  function buildCsv(): string {
+    return pirogiAnchorsToCsv(
+      anchors.map((a) => ({
+        targetUrl: a.targetUrl,
+        anchorText: a.anchorText,
+        category: a.category,
+        payloadV2: a.payloadV2 ?? { linkType: "", geo: "", lang: "" },
+      })),
+      { includeLinkType }
+    );
+  }
   function exportCsv() {
-    const csv = pirogiAnchorsToCsv(anchors.map((a) => ({
-      targetUrl: a.targetUrl,
-      anchorText: a.anchorText,
-      category: a.category,
-      payloadV2: a.payloadV2 ?? { linkType: "", geo: "", lang: "" },
-    })));
+    const csv = buildCsv();
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -209,13 +220,7 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
     URL.revokeObjectURL(url);
   }
   async function copyAll() {
-    const csv = pirogiAnchorsToCsv(anchors.map((a) => ({
-      targetUrl: a.targetUrl,
-      anchorText: a.anchorText,
-      category: a.category,
-      payloadV2: a.payloadV2 ?? { linkType: "", geo: "", lang: "" },
-    })));
-    await navigator.clipboard.writeText(csv);
+    await navigator.clipboard.writeText(buildCsv());
     toast(t("jobView.toasts.copied"), "success");
   }
 
@@ -258,6 +263,11 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
               <Pencil className="h-3.5 w-3.5" /> {t("common.edit")}
             </Button>
           </Link>
+          {/* Toggle: include the Link Type column in export + copy output. */}
+          <label className="flex items-center gap-1.5 text-xs text-[var(--color-text-dim)] cursor-pointer select-none px-1.5">
+            <Checkbox checked={includeLinkType} onCheckedChange={(v) => setIncludeLinkType(v === true)} />
+            {t("jobView.pirogi.includeLinkType")}
+          </label>
           <Button size="sm" variant="ghost" onClick={copyAll} disabled={anchors.length === 0}>
             <Copy className="h-3.5 w-3.5" /> {t("common.copy")}
           </Button>

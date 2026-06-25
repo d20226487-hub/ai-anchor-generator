@@ -2,10 +2,11 @@ import Papa from "papaparse";
 import type { AnchorCategory } from "../types";
 
 /**
- * Convert Пироги (v3) anchors to the 9-column CSV deliverable.
+ * Convert Пироги (v3) anchors to the CSV deliverable.
  *
- * Layout:
- *   URL | Anchor | Quantity | Language | Country | Keyword Group | Anchor Type | KEYWORD | KEYWORD GROUP
+ * Layout (9 columns; 10 when opts.includeLinkType is set — "Link Type" is then
+ * inserted right after URL, mirroring V2's "Type" column position):
+ *   URL | [Link Type] | Anchor | Quantity | Language | Country | Keyword Group | Anchor Type | KEYWORD | KEYWORD GROUP
  *
  * Keyword Group = UNIQUE-ANCHOR ID. Walk the anchor list in arrival order and
  * assign `group 1` to the first unique anchor text seen (case-insensitive),
@@ -31,25 +32,36 @@ export function pirogiAnchorsToCsv(
     anchorText: string;
     category: AnchorCategory;
     payloadV2?: { linkType: string; geo: string; lang: string; quantity?: number } | null;
-  }>
+  }>,
+  opts: { includeLinkType?: boolean } = {}
 ): string {
+  const includeLinkType = opts.includeLinkType ?? false;
   // Sequential unique-anchor numbering (case-insensitive). Same anchor → same number.
   // Used for BOTH the LEFT "Keyword Group" and the helper "KEYWORD GROUP" so they match.
   const groupForRow = computePirogiKeywordGroups(anchors.map((a) => a.anchorText));
 
+  const fields = includeLinkType
+    ? ["URL", "Link Type", "Anchor", "Quantity", "Language", "Country", "Keyword Group", "Anchor Type", "KEYWORD", "KEYWORD GROUP"]
+    : ["URL", "Anchor", "Quantity", "Language", "Country", "Keyword Group", "Anchor Type", "KEYWORD", "KEYWORD GROUP"];
+
   return Papa.unparse({
-    fields: ["URL", "Anchor", "Quantity", "Language", "Country", "Keyword Group", "Anchor Type", "KEYWORD", "KEYWORD GROUP"],
-    data: anchors.map((a, i) => [
-      a.targetUrl,
-      a.anchorText,
-      a.payloadV2?.quantity ?? 1,
-      a.payloadV2?.lang ?? "",
-      a.payloadV2?.geo ?? "",
-      groupForRow[i],
-      a.category,
-      a.anchorText,     // KEYWORD = duplicate of Anchor (spreadsheet helper col)
-      groupForRow[i],   // KEYWORD GROUP = SAME unique-anchor id as the left column
-    ]),
+    fields,
+    data: anchors.map((a, i) => {
+      const row = [
+        a.targetUrl,
+        a.anchorText,
+        a.payloadV2?.quantity ?? 1,
+        a.payloadV2?.lang ?? "",
+        a.payloadV2?.geo ?? "",
+        groupForRow[i],
+        a.category,
+        a.anchorText,     // KEYWORD = duplicate of Anchor (spreadsheet helper col)
+        groupForRow[i],   // KEYWORD GROUP = SAME unique-anchor id as the left column
+      ];
+      // Insert Link Type right after URL (index 1) when requested.
+      if (includeLinkType) row.splice(1, 0, a.payloadV2?.linkType ?? "");
+      return row;
+    }),
   });
 }
 

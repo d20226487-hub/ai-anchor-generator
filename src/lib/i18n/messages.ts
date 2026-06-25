@@ -388,6 +388,7 @@ const en = {
     pirogi: {
       uniqueAnchorsLower: "unique anchors",
       totalLinksLower: "total links",
+      includeLinkType: "Link Type",
       cols: {
         url: "URL",
         anchor: "Anchor",
@@ -912,6 +913,7 @@ const ru: typeof en = {
     pirogi: {
       uniqueAnchorsLower: "уникальных анкоров",
       totalLinksLower: "ссылок суммарно",
+      includeLinkType: "Тип ссылки",
       cols: {
         url: "URL",
         anchor: "Анкор",
