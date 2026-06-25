@@ -136,12 +136,21 @@ import type { AnchorCategory } from "../types";
 const DEFAULT_V2_TARGET_ANCHORS_PER_BATCH = 200;
 
 export interface V2BatchEntry {
-  /** The originating input row. Carries id, targetUrl, and full payloadV2 for linkType/geo/lang echo. */
+  /** The originating input row. Carries id, targetUrl, and full payloadV2 for linkType/geo echo. */
   input: JobInput;
+  /** Single language code this entry's anchors must be written in ("" = unspecified /
+   *  legacy). When a row carries a multi-language distribution it expands into one entry
+   *  per language; this is that language. */
+  lang: string;
+  /** Stable id the AI must echo so anchors map back. For language-split rows it's
+   *  `${input.id}::${lang}` (distinct per language); otherwise the bare input id. The
+   *  jobLoop maps purely by this string, so its exact format doesn't matter as long as
+   *  compose emits it and the loop looks it up by the same value. */
+  promptId: string;
   /**
    * EXACT integer counts the AI should produce for this entry within THIS batch.
-   * For unsplit rows: sum equals the row's payloadV2.numberOfLinks.
-   * For split rows: sum is a slice; concatenating all sub-batches gives the row's total.
+   * For unsplit (row,lang): sum equals that language's share of numberOfLinks.
+   * For split rows: sum is a slice; concatenating all sub-batches gives the total.
    */
   exactCounts: Record<AnchorCategory, number>;
 }
@@ -164,22 +173,76 @@ function hamiltonInts(parts: Record<AnchorCategory, number>, total: number): Rec
   return { url: floor[0], branded: floor[1], generic: floor[2], keyword: floor[3] };
 }
 
+/** Generic Hamilton/largest-remainder: split `total` across N relative weights → N ints summing to total. */
+function hamiltonByWeights(weights: number[], total: number): number[] {
+  if (total <= 0 || weights.length === 0) return weights.map(() => 0);
+  const safe = weights.map((w) => (w > 0 ? w : 0));
+  const sum = safe.reduce((a, b) => a + b, 0) || 1;
+  const raw = safe.map((w) => (w / sum) * total);
+  const floor = raw.map((x) => Math.floor(x));
+  let allocated = floor.reduce((a, b) => a + b, 0);
+  const rem = raw.map((x, i) => ({ i, r: x - floor[i] })).sort((a, b) => b.r - a.r);
+  for (const { i } of rem) {
+    if (allocated >= total) break;
+    floor[i]++;
+    allocated++;
+  }
+  return floor;
+}
+
 /**
- * Compute the row's full per-category counts (Hamilton-rounded to sum to numberOfLinks).
- * This is the "target" we then slice across one or more sub-batches.
+ * One (input row × language) unit. A row with no/one language yields a single expanded
+ * row; a multi-language row (langDist with >1 entry) yields one per language, its
+ * numberOfLinks Hamilton-split by the language weights, then split across categories.
  */
-function rowExactCounts(input: JobInput): Record<AnchorCategory, number> {
-  const p = input.payloadV2;
-  if (!p) return { url: 0, branded: 0, generic: 0, keyword: 0 };
-  return hamiltonInts(
-    {
+interface ExpandedRowV2 {
+  input: JobInput;
+  lang: string;
+  promptId: string;
+  /** Full per-category counts for this (row,lang), summing to its language share. */
+  exactCounts: Record<AnchorCategory, number>;
+}
+
+function expandRowsByLanguage(inputs: JobInput[]): ExpandedRowV2[] {
+  const out: ExpandedRowV2[] = [];
+  for (const input of inputs) {
+    const p = input.payloadV2;
+    if (!p || (p.numberOfLinks ?? 0) <= 0) continue;
+    const catDist = {
       url: p.distribution.url ?? 0,
       branded: p.distribution.branded ?? 0,
       generic: p.distribution.generic ?? 0,
       keyword: p.distribution.keyword ?? 0,
-    },
-    p.numberOfLinks
-  );
+    };
+    const dist = p.langDist && p.langDist.length > 0 ? p.langDist : null;
+
+    // No distribution, or exactly one language → a single expanded row (legacy behaviour).
+    if (!dist || dist.length === 1) {
+      const lang = dist ? dist[0].code : (p.lang ?? "");
+      out.push({
+        input,
+        lang,
+        promptId: lang ? `${input.id}::${lang}` : input.id,
+        exactCounts: hamiltonInts(catDist, p.numberOfLinks),
+      });
+      continue;
+    }
+
+    // Multi-language → split numberOfLinks across languages first, then categories.
+    const langCounts = hamiltonByWeights(dist.map((d) => d.pct), p.numberOfLinks);
+    for (let i = 0; i < dist.length; i++) {
+      const c = langCounts[i];
+      if (c <= 0) continue; // a tiny weight can round to 0 links — drop that language for this row
+      const code = dist[i].code;
+      out.push({
+        input,
+        lang: code,
+        promptId: `${input.id}::${code}`,
+        exactCounts: hamiltonInts(catDist, c),
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -195,7 +258,7 @@ function rowExactCounts(input: JobInput): Record<AnchorCategory, number> {
  *   - Subtract from remaining; repeat until remaining = 0.
  *   This guarantees the sum across sub-batches equals the row's intended total.
  */
-function computeBatches(inputs: JobInput[], target: number): V2BatchEntry[][] {
+function computeBatches(rows: ExpandedRowV2[], target: number): V2BatchEntry[][] {
   const batches: V2BatchEntry[][] = [];
   let current: V2BatchEntry[] = [];
   let currentTotal = 0;
@@ -208,12 +271,9 @@ function computeBatches(inputs: JobInput[], target: number): V2BatchEntry[][] {
     }
   };
 
-  for (const input of inputs) {
-    const n = input.payloadV2?.numberOfLinks ?? 0;
-    if (n <= 0) continue;
-
-    // Tracks how many anchors remain per category for THIS row as we slice.
-    let remaining = rowExactCounts(input);
+  for (const row of rows) {
+    // Tracks how many anchors remain per category for THIS (row,lang) as we slice.
+    let remaining = { ...row.exactCounts };
     let remainingTotal = remaining.url + remaining.branded + remaining.generic + remaining.keyword;
 
     while (remainingTotal > 0) {
@@ -232,7 +292,7 @@ function computeBatches(inputs: JobInput[], target: number): V2BatchEntry[][] {
 
       // Slice `take` anchors out of `remaining`, Hamilton-rounded by the remaining ratios.
       const slice = hamiltonInts(remaining as Record<AnchorCategory, number>, take);
-      current.push({ input, exactCounts: slice });
+      current.push({ input: row.input, lang: row.lang, promptId: row.promptId, exactCounts: slice });
       currentTotal += take;
 
       // Subtract slice from remaining.
@@ -256,7 +316,7 @@ function computeBatches(inputs: JobInput[], target: number): V2BatchEntry[][] {
 /** Number of batches needed for the run. Persisted on jobs.batches_total. */
 export function planBatchesV2(inputs: JobInput[], targetAnchorsPerBatch = DEFAULT_V2_TARGET_ANCHORS_PER_BATCH): BatchPlan {
   const target = Math.max(1, targetAnchorsPerBatch);
-  const batches = computeBatches(inputs, target);
+  const batches = computeBatches(expandRowsByLanguage(inputs), target);
   return { batchSize: target, batchesTotal: Math.max(1, batches.length) };
 }
 
@@ -269,7 +329,7 @@ export function planBatchV2(args: {
 }): V2BatchEntry[] {
   const { batchIndex, inputs, targetAnchorsPerBatch = DEFAULT_V2_TARGET_ANCHORS_PER_BATCH } = args;
   const target = Math.max(1, targetAnchorsPerBatch);
-  const batches = computeBatches(inputs, target);
+  const batches = computeBatches(expandRowsByLanguage(inputs), target);
   return batches[batchIndex] ?? [];
 }
 

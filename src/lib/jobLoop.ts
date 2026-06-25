@@ -420,37 +420,39 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
     return { kind: "running", message: "Empty batch (continuing)", anchorsAdded: 0 };
   }
 
-  // Map parsed → input by id. URL fallback is intentionally NOT included for V2 because
-  // every entry already has a unique id and V2 inputs commonly share Target URLs across
-  // rows (different Link Types), so URL-based fallback would be ambiguous.
-  // Note: multiple entries in this batch may share the same input.id when a heavy row
-  // got split across sub-batches. The lookup is by input.id (not entry id), so all
-  // sub-batch anchors collapse back onto the right input row — which is what we want.
-  const byId = new Map(validEntries.map((e) => [e.input.id, e.input]));
+  // Map parsed → entry by promptId (the exact id string compose emitted, which the AI
+  // echoes). URL fallback is intentionally NOT included for V2 because V2 inputs commonly
+  // share Target URLs across rows. The promptId is unique per (input, language) within a
+  // batch, so language-split anchors land back on the right language; heavy rows split
+  // across batches keep the same promptId, collapsing onto the right input row.
+  const byPromptId = new Map(validEntries.map((e) => [e.promptId, e]));
   const anchorsToInsert = parsed
     .map((p) => {
-      const matched = byId.get(p.id);
-      if (!matched) return null;
-      const payload = matched.payloadV2!;
+      const entry = byPromptId.get(p.id);
+      if (!entry) return null;
+      const input = entry.input;
+      const payload = input.payloadV2!;
       // For url-category anchors, FORCE anchorText to the input's exact Target URL,
       // character-for-character. The AI is repeatedly observed to hallucinate variations
       // (lordfilmhd.co / lordfilmhd.com / lordfilmhd.net for example.com), so we don't
       // trust its url-category output at all. Belt-and-suspenders even when the prompt
       // is explicit. For non-url categories, use the AI's text as-is.
-      const anchorText = p.category === "url" ? matched.targetUrl : p.anchorText;
+      const anchorText = p.category === "url" ? input.targetUrl : p.anchorText;
       return {
-        inputId: matched.id,
-        targetUrl: matched.targetUrl,
+        inputId: input.id,
+        targetUrl: input.targetUrl,
         brandId: null,
         followStatus: null,
         anchorText,
         category: p.category,
-        // V2 echo-through fields. Prefer what AI returned, fall back to the input's value
-        // so a stripped-output anchor still carries the right metadata.
+        // V2 echo-through fields. lang is AUTHORITATIVE from the planner entry (which
+        // language this entry was generated for) — the AI's echo is only a fallback, since
+        // a language-split row must tag each anchor with its assigned code, not whatever
+        // the model decided to echo. linkType / geo prefer the AI echo then the input.
         payloadV2: {
           linkType: p.linkType || payload.linkType,
           geo: p.geo || payload.geo,
-          lang: p.lang || payload.lang,
+          lang: entry.lang || p.lang || payload.lang,
         },
       };
     })

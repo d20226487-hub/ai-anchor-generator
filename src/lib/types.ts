@@ -83,8 +83,15 @@ export interface JobInputPayloadV2 {
   distribution: DistributionPct;
   /** Free-text geo label that flows through to the output. */
   geo: string;
-  /** Free-text language label (or ISO code). */
+  /** Raw Lang column value, as typed by the user (e.g. "RU", "RU/KZ", "RU:50/KZ:30").
+   *  Kept verbatim for display + CSV round-trip. The structured split lives in langDist. */
   lang: string;
+  /** V2 only: parsed language distribution from the Lang column (added 2026-05-27).
+   *  Each entry = a language code + its percentage weight. When present with >1 entry,
+   *  `numberOfLinks` is split across the languages (Hamilton) before the per-category
+   *  split, and each produced anchor is written in — and tagged with — one of these
+   *  codes. Empty/absent ⇒ single language taken from `lang` (legacy behaviour). */
+  langDist?: Array<{ code: string; pct: number }> | null;
 }
 
 export interface JobAnchor {

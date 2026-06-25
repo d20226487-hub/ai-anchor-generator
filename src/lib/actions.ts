@@ -551,6 +551,11 @@ export async function actionRebalanceV2Row(
     }
     const entry = {
       input: ownerInput,
+      // Rebalance is per (URL, Link Type) and doesn't language-split: keep the bare input
+      // id (so the `p.id === ownerId` filter below still matches) and let compose fall
+      // back to the input's raw lang string.
+      lang: "",
+      promptId: ownerInput.id,
       exactCounts: plan.generate.perCategory,
     };
     const prompt = composeGenerationPromptV2({

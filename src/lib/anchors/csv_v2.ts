@@ -102,6 +102,55 @@ function parseInt0(raw: string): number {
 }
 
 /**
+ * Parse the Lang cell into a language distribution.
+ *
+ * Accepted forms (slash-separated):
+ *   "RU"              → [{RU,100}]
+ *   "RU/KZ/UZ"        → equal split → [{RU,33.33},{KZ,33.33},{UZ,33.33}]
+ *   "RU:50/KZ:30/UZ:20" → explicit weights
+ *   "RU:50/KZ/UZ"     → RU=50, the remaining 50 split equally over KZ+UZ → 25 each
+ *
+ * Weights are RELATIVE — the planner Hamilton-rounds them against the row's
+ * numberOfLinks, so they don't have to sum to exactly 100. Returns the list plus an
+ * optional human-readable warning (never an error — a malformed Lang cell shouldn't
+ * block the whole job; worst case it falls back to a single language).
+ */
+function parseLangDist(raw: string): { langs: Array<{ code: string; pct: number }>; warning?: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { langs: [] };
+  const parts = trimmed.split("/").map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) return { langs: [] };
+
+  const parsed = parts.map((part) => {
+    const m = part.match(/^(.+?)\s*:\s*(\d+(?:[.,]\d+)?)\s*$/);
+    if (m) return { code: m[1].trim(), weight: Number(m[2].replace(",", ".")) };
+    return { code: part, weight: null as number | null };
+  });
+
+  const explicit = parsed.filter((p) => p.weight != null) as Array<{ code: string; weight: number }>;
+  const unweighted = parsed.filter((p) => p.weight == null);
+
+  let warning: string | undefined;
+
+  // No weights anywhere → equal split.
+  if (explicit.length === 0) {
+    const pct = 100 / parsed.length;
+    return { langs: parsed.map((p) => ({ code: p.code, pct })) };
+  }
+
+  // Some/all weighted. Explicit weights are taken as-is; whatever is left of 100 is
+  // shared equally among the unweighted languages (0 each if nothing remains).
+  const sumExplicit = explicit.reduce((a, p) => a + p.weight, 0);
+  const remainder = Math.max(0, 100 - sumExplicit);
+  const perUnweighted = unweighted.length > 0 ? remainder / unweighted.length : 0;
+  if (unweighted.length > 0 && remainder === 0) {
+    warning = `explicit language weights already total ${sumExplicit}; ${unweighted.map((u) => u.code).join(", ")} would get 0`;
+  }
+  const langs = parsed.map((p) => ({ code: p.code, pct: p.weight != null ? p.weight : perUnweighted }));
+  return { langs, warning };
+}
+
+/**
  * @param opts.linkTypeRequired - V2 requires Link Type on every row (it's a primary
  *   axis of the V2 distribution model). Пироги (v3) reuses this parser but doesn't
  *   care about Link Type — set false to drop the column from the required set AND
@@ -188,6 +237,10 @@ export function parseCsvTextV2(text: string, opts: { linkTypeRequired?: boolean 
     const langField = lookup.get("lang");
     const geo = geoField ? (r[geoField] ?? "").trim() : "";
     const lang = langField ? (r[langField] ?? "").trim() : "";
+    // Parse the (possibly multi-language, possibly weighted) Lang cell. Warnings are
+    // attached with the row label; they never block the row.
+    const { langs: langDist, warning: langWarning } = parseLangDist(lang);
+    if (langWarning) warnings.push(`${rowNumLabel}: ${langWarning}.`);
 
     rows.push({
       targetUrl: url,
@@ -204,6 +257,7 @@ export function parseCsvTextV2(text: string, opts: { linkTypeRequired?: boolean 
         },
         geo,
         lang,
+        langDist,
       },
     });
   }

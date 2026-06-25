@@ -106,13 +106,14 @@ Each entry carries its own category percentages (URL%, Brand%, Generic%, Keyword
 
 ## Input format
 Each entry has:
-- id (required — echo it back on every anchor produced for this entry)
+- id (required — echo it back VERBATIM on every anchor for this entry. It may contain a "::<lang>" suffix; copy the whole string exactly, do not strip or alter it)
 - targetUrl
+- hostnameForBrand
 - linkType (free-text label — echo back on every produced anchor)
-- numberOfLinks (exact integer — produce this many anchors for this entry)
-- distribution: { url, brand, generic, keyword } in percent
+- produceExactly (exact integer — produce this many anchors for this entry)
+- exactCounts (the per-category integer counts — match them EXACTLY)
 - geo (free-text — echo back on every produced anchor)
-- lang (language code or label — write generic + keyword anchors in this language)
+- lang (a SINGLE language for this entry — write ALL of the entry's generic/brand/keyword anchors in this one language, and echo it back on each anchor). Note: the same targetUrl may appear as several entries with different languages; treat each entry independently.
 
 ================================================================
 EVERYTHING ABOVE THIS LINE IS STABLE — caching boundary
@@ -124,8 +125,9 @@ EVERYTHING BELOW THIS LINE IS PER-BATCH — never identical across calls
 
 ## Output rules
 - Output ONLY a JSON object with a single key "anchors" — no prose, no markdown, no code fences.
-- Each anchor object: { "id": "<entry id>", "anchorText": "...", "category": "url"|"brand"|"generic"|"keyword", "linkType": "<echoed>", "geo": "<echoed>", "lang": "<echoed>" }
-- Produce exactly numberOfLinks anchors for each entry, with category counts matching the rounded distribution.
+- Each anchor object: { "id": "<entry id, verbatim>", "anchorText": "...", "category": "url"|"brand"|"generic"|"keyword", "linkType": "<echoed>", "geo": "<echoed>", "lang": "<entry's lang>" }
+- Produce exactly produceExactly anchors for each entry, with category counts matching exactCounts.
+- Write each entry's anchors in that entry's single language.
 - Anchor texts must look natural — vary length, casing, phrasing. No exact duplicates within an entry.
 
 Return only the JSON object.`;

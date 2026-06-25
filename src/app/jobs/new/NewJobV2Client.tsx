@@ -24,10 +24,15 @@ function labelFor(p: ProviderId): string {
     : "Google Vertex AI";
 }
 
+// Lang accepts one or more codes. Multiple = a per-row language split:
+//   RU              → 100% RU
+//   RU/KZ/UZ        → equal thirds
+//   RU:50/KZ:30/UZ:20 → weighted
+//   RU:60/KZ        → RU 60%, KZ gets the remaining 40%
 const V2_CSV_PLACEHOLDER = `Target URL,Link Type,Number of links,URL,Brand,Generic,Keyword,GEO,Lang
 https://example.com,Web 2.0,30,100,0,0,0,Russia,RU
-https://example.com,Comment,30,100,0,0,0,Russia,RU
-https://example.com,Profile,5,0,100,0,0,Russia,RU`;
+https://example.com,Comment,30,0,100,0,0,Kazakhstan/Russia,RU:60/KZ:40
+https://example.com,Profile,5,0,0,50,50,CIS,RU/KZ/UZ`;
 
 export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
   const searchParams = useSearchParams();
