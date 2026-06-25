@@ -217,9 +217,14 @@ export function composeGenerationPromptV2(args: ComposeV2Args): string {
         hostHint = input.targetUrl.replace(/^https?:\/\//i, "").split("/")[0].replace(/^www\./i, "");
       }
       // Entry language: the planner assigns a single code per entry (a multi-language row
-      // expands into one entry per language). Fall back to the input's raw lang string for
-      // legacy / rebalance entries that don't set e.lang.
+      // expands into one entry per language, plus a neutral URL-only entry with no lang).
+      // Fall back to the input's raw lang string for legacy / rebalance entries.
       const entryLang = e.lang || p.lang || "";
+      // url-only entries (and no-language entries) get no language directive — a bare URL
+      // is language-neutral.
+      const langLine = entryLang
+        ? `   lang: ${entryLang}  ← write ALL of this entry's anchors in this one language`
+        : `   lang: (none) — URL/neutral anchors, no language`;
       const lines = [
         // Echo `id` VERBATIM — for language-split rows it carries a "::<lang>" suffix that
         // distinguishes this language's anchors from the same URL's other languages.
@@ -234,8 +239,7 @@ export function composeGenerationPromptV2(args: ComposeV2Args): string {
         `   produceExactly: ${subTotal}`,
         `   exactCounts: { url: ${counts.url}, brand: ${counts.branded}, generic: ${counts.generic}, keyword: ${counts.keyword} }  ← produce EXACTLY these per category`,
         `   geo: ${p.geo || "(none)"}`,
-        // Single language for THIS entry — every anchor here must be written in it.
-        `   lang: ${entryLang || "(none)"}  ← write ALL of this entry's anchors in this one language`,
+        langLine,
       ];
       return lines.join("\n");
     })

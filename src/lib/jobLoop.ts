@@ -437,7 +437,8 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
       // (lordfilmhd.co / lordfilmhd.com / lordfilmhd.net for example.com), so we don't
       // trust its url-category output at all. Belt-and-suspenders even when the prompt
       // is explicit. For non-url categories, use the AI's text as-is.
-      const anchorText = p.category === "url" ? input.targetUrl : p.anchorText;
+      const isUrl = p.category === "url";
+      const anchorText = isUrl ? input.targetUrl : p.anchorText;
       return {
         inputId: input.id,
         targetUrl: input.targetUrl,
@@ -448,11 +449,13 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
         // V2 echo-through fields. lang is AUTHORITATIVE from the planner entry (which
         // language this entry was generated for) — the AI's echo is only a fallback, since
         // a language-split row must tag each anchor with its assigned code, not whatever
-        // the model decided to echo. linkType / geo prefer the AI echo then the input.
+        // the model decided to echo. URL-category anchors are language-NEUTRAL → always
+        // blank lang (a bare URL has no language; it's excluded from the lang split).
+        // linkType / geo prefer the AI echo then the input.
         payloadV2: {
           linkType: p.linkType || payload.linkType,
           geo: p.geo || payload.geo,
-          lang: entry.lang || p.lang || payload.lang,
+          lang: isUrl ? "" : (entry.lang || p.lang || payload.lang),
         },
       };
     })

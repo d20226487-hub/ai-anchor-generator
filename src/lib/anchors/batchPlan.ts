@@ -192,14 +192,14 @@ function hamiltonByWeights(weights: number[], total: number): number[] {
 
 /**
  * One (input row × language) unit. A row with no/one language yields a single expanded
- * row; a multi-language row (langDist with >1 entry) yields one per language, its
- * numberOfLinks Hamilton-split by the language weights, then split across categories.
+ * row; a multi-language row (langDist with >1 entry) yields one neutral URL entry plus
+ * one entry per language for the non-URL budget (see below).
  */
 interface ExpandedRowV2 {
   input: JobInput;
   lang: string;
   promptId: string;
-  /** Full per-category counts for this (row,lang), summing to its language share. */
+  /** Per-category counts for this entry, summing to its share of numberOfLinks. */
   exactCounts: Record<AnchorCategory, number>;
 }
 
@@ -217,6 +217,8 @@ function expandRowsByLanguage(inputs: JobInput[]): ExpandedRowV2[] {
     const dist = p.langDist && p.langDist.length > 0 ? p.langDist : null;
 
     // No distribution, or exactly one language → a single expanded row (legacy behaviour).
+    // url-category anchors here still get a blank lang tag at insert time (jobLoop), but
+    // with one language there's no split to exclude them from.
     if (!dist || dist.length === 1) {
       const lang = dist ? dist[0].code : (p.lang ?? "");
       out.push({
@@ -228,18 +230,37 @@ function expandRowsByLanguage(inputs: JobInput[]): ExpandedRowV2[] {
       continue;
     }
 
-    // Multi-language → split numberOfLinks across languages first, then categories.
-    const langCounts = hamiltonByWeights(dist.map((d) => d.pct), p.numberOfLinks);
-    for (let i = 0; i < dist.length; i++) {
-      const c = langCounts[i];
-      if (c <= 0) continue; // a tiny weight can round to 0 links — drop that language for this row
-      const code = dist[i].code;
+    // Multi-language: URL anchors are language-NEUTRAL (a bare URL is identical in every
+    // language), so they are EXCLUDED from the language split. Carve the url-category
+    // budget into its own neutral entry (bare input id), then split ONLY the
+    // brand/generic/keyword remainder across the languages.
+    const full = hamiltonInts(catDist, p.numberOfLinks);
+    const urlCount = full.url;
+    const nonUrlTotal = p.numberOfLinks - urlCount;
+
+    if (urlCount > 0) {
       out.push({
         input,
-        lang: code,
-        promptId: `${input.id}::${code}`,
-        exactCounts: hamiltonInts(catDist, c),
+        lang: "", // neutral — url anchors carry no language
+        promptId: input.id,
+        exactCounts: { url: urlCount, branded: 0, generic: 0, keyword: 0 },
       });
+    }
+
+    if (nonUrlTotal > 0) {
+      const nonUrlDist = { url: 0, branded: catDist.branded, generic: catDist.generic, keyword: catDist.keyword };
+      const langCounts = hamiltonByWeights(dist.map((d) => d.pct), nonUrlTotal);
+      for (let i = 0; i < dist.length; i++) {
+        const c = langCounts[i];
+        if (c <= 0) continue; // a tiny weight can round to 0 links — drop that language for this row
+        const code = dist[i].code;
+        out.push({
+          input,
+          lang: code,
+          promptId: `${input.id}::${code}`,
+          exactCounts: hamiltonInts(nonUrlDist, c),
+        });
+      }
     }
   }
   return out;
