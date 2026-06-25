@@ -166,7 +166,19 @@ export function composeRegenerationPrompt(args: RegenArgs): string {
 function injectSiteDescription(prompt: string, desc: string | null | undefined): string {
   const trimmed = (desc ?? "").trim();
   const block = trimmed
-    ? `## Site context\nThe following describes the site(s)/page(s) these backlinks point to. Use it to make the anchors more relevant and on-topic:\n${trimmed}`
+    ? [
+        "## Site context",
+        "The text below describes the site(s)/page(s) these backlinks point to. It may also include example keywords, phrases, or anchor formulas to work from. Use it to make the anchors relevant and on-topic.",
+        "",
+        "IMPORTANT — vary the provided keywords; do NOT reuse the exact same wording every time:",
+        "- Treat any keywords/phrases below as EXAMPLES to paraphrase, not fixed strings to copy verbatim across every anchor and every site.",
+        "- Mix in natural synonyms, alternate word order, partial/phrase matches, and — where the language has them — morphological variations (cases, declensions, singular/plural). Respect each entry's language.",
+        "- Across many backlinks, exact-match repetition of the same keyword looks unnatural to search engines. Aim for a diverse, natural anchor profile while preserving the original meaning and intent.",
+        "- This applies to generic / brand / keyword anchors. URL-category anchors are EXEMPT — they must remain the exact Target URL.",
+        "",
+        "Site context:",
+        trimmed,
+      ].join("\n")
     : "";
   if (prompt.includes("{{SITE_DESCRIPTION}}")) {
     return prompt.replaceAll("{{SITE_DESCRIPTION}}", block);
