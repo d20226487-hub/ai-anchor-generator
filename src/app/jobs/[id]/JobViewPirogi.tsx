@@ -12,6 +12,7 @@ import {
   actionDeleteJob,
   actionGetJobStatus,
   actionPauseGeneration,
+  actionReconcilePirogiQuantities,
   actionRegeneratePirogi,
   actionRenameJob,
   actionStartGeneration,
@@ -19,7 +20,7 @@ import {
 import { computePirogiKeywordGroups, pirogiAnchorsToCsv } from "@/lib/anchors/csv_pirogi";
 import { CostPill } from "@/components/CostPill";
 import { ANCHOR_CATEGORIES, type AnchorCategory, type Job } from "@/lib/types";
-import { AlertTriangle, ChevronLeft, ChevronRight, Copy, Download, Info, Pause, Pencil, Play, RefreshCw, Search, Trash2, Wand2, X } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Copy, Download, Info, Pause, Pencil, Play, RefreshCw, Scale, Search, Trash2, Wand2, X } from "lucide-react";
 import { useT } from "@/lib/i18n/I18nProvider";
 
 const POLL_INTERVAL_MS = 2500;
@@ -165,6 +166,25 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
     }
   }
 
+  const [reconcileBusy, setReconcileBusy] = React.useState(false);
+  async function reconcileQuantities() {
+    if (!confirm(t("jobView.pirogi.reconcileConfirm"))) return;
+    setReconcileBusy(true);
+    try {
+      const r = await actionReconcilePirogiQuantities(job.id);
+      if (r.ok) {
+        toast(r.message, r.rowsWithNoAnchors > 0 || r.after < r.requested ? "info" : "success");
+        router.refresh();
+      } else {
+        toast(r.message, "error");
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      setReconcileBusy(false);
+    }
+  }
+
   async function rename() {
     const v = name.trim();
     if (!v || v === job.name) { setRenaming(false); return; }
@@ -268,6 +288,9 @@ export function JobViewPirogi({ job, pricingMissing = false }: { job: Job; prici
             <Checkbox checked={includeLinkType} onCheckedChange={(v) => setIncludeLinkType(v === true)} />
             {t("jobView.pirogi.includeLinkType")}
           </label>
+          <Button size="sm" variant="ghost" onClick={reconcileQuantities} disabled={reconcileBusy || anchors.length === 0} title={t("jobView.pirogi.reconcileHint")}>
+            <Scale className="h-3.5 w-3.5" /> {t("jobView.pirogi.reconcile")}
+          </Button>
           <Button size="sm" variant="ghost" onClick={copyAll} disabled={anchors.length === 0}>
             <Copy className="h-3.5 w-3.5" /> {t("common.copy")}
           </Button>

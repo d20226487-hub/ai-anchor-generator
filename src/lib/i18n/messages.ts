@@ -389,6 +389,9 @@ const en = {
       uniqueAnchorsLower: "unique anchors",
       totalLinksLower: "total links",
       includeLinkType: "Link Type",
+      reconcile: "Even out quantities",
+      reconcileHint: "Split each row's Number of links evenly across its anchors (fixes export totals that fall short of what was requested)",
+      reconcileConfirm: "Even out the link quantities? For each row (page + link type), its Number of links is split evenly across its anchors, so the totals match exactly what you requested. This overwrites the AI's quantities but never changes the anchor text. Rows that generated no anchors can't be filled.",
       cols: {
         url: "URL",
         anchor: "Anchor",
@@ -914,6 +917,9 @@ const ru: typeof en = {
       uniqueAnchorsLower: "уникальных анкоров",
       totalLinksLower: "ссылок суммарно",
       includeLinkType: "Тип ссылки",
+      reconcile: "Выровнять количество",
+      reconcileHint: "Разделить Number of links каждой строки поровну между её анкорами (исправляет итоги экспорта, которые меньше запрошенного)",
+      reconcileConfirm: "Выровнять количество ссылок? Для каждой строки (страница + тип ссылки) её Number of links делится поровну между анкорами, чтобы итоги точно совпадали с запрошенным. Это перезапишет количество от ИИ, но не изменит текст анкоров. Строки без анкоров заполнить нельзя.",
       cols: {
         url: "URL",
         anchor: "Анкор",

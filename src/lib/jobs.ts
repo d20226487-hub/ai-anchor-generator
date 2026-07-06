@@ -405,6 +405,23 @@ export async function clearJobAnchors(jobId: string): Promise<void> {
   await c.execute({ sql: "DELETE FROM job_anchors WHERE job_id = ?", args: [jobId] });
 }
 
+/**
+ * Overwrite the full V2/Пироги `payload` (JSON) of specific anchors. Used by the Пироги
+ * quantity reconcile to write adjusted `quantity` values. Does NOT set manually_edited
+ * (this is a bulk quantity normalisation, not a hand edit of anchor text).
+ */
+export async function setAnchorPayloads(jobId: string, updates: Array<{ id: string; payloadV2: JobAnchorPayloadV2 }>): Promise<void> {
+  if (updates.length === 0) return;
+  const c = await db();
+  for (const u of updates) {
+    await c.execute({
+      sql: "UPDATE job_anchors SET payload = ? WHERE id = ? AND job_id = ?",
+      args: [JSON.stringify(u.payloadV2), u.id, jobId],
+    });
+  }
+  await c.execute({ sql: "UPDATE jobs SET updated_at = ? WHERE id = ?", args: [Date.now(), jobId] });
+}
+
 export async function getAnchorsByIds(ids: string[]): Promise<JobAnchor[]> {
   if (ids.length === 0) return [];
   const c = await db();

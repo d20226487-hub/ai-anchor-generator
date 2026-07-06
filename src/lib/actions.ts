@@ -30,6 +30,7 @@ import {
   resetJobCost,
   restoreFolder,
   restoreJob,
+  setAnchorPayloads,
   setJobStatus,
   softDeleteFolder,
   updateAnchorFollow,
@@ -778,6 +779,101 @@ export async function actionRegenerateV2(
   const msgParts = [`Regenerated ${updates.length} anchor(s).`];
   if (skippedUrl > 0) msgParts.push(`${skippedUrl} URL-category anchor(s) skipped (always equal to Target URL).`);
   return { ok: true, message: msgParts.join(" "), regenerated: updates.length, skippedUrl };
+}
+
+// ----- Пироги quantity reconcile -----
+
+export interface ReconcilePirogiResult {
+  ok: boolean;
+  message: string;
+  /** Input rows whose anchors had their quantities adjusted. */
+  rowsReconciled: number;
+  /** Total link count (sum of quantities) before and after. */
+  before: number;
+  after: number;
+  /** Sum of numberOfLinks across all input rows — the target the export should hit. */
+  requested: number;
+  /** Rows that produced ZERO anchors during generation and so can't be reconciled
+   *  (nothing to split onto). These keep the total below `requested`. */
+  rowsWithNoAnchors: number;
+}
+
+/**
+ * Even out Пироги anchor quantities per input row. For each row (a page + Link Type +
+ * language + GEO), split its `numberOfLinks` EVENLY across the row's unique anchors
+ * (largest-remainder for the leftover), so every row sums to exactly numberOfLinks and
+ * each anchor is used an equal number of times. Link types stay separate. Only the
+ * per-anchor `quantity` changes — anchor text / category / rows are untouched.
+ *
+ * Fixes the "export total < requested" gap that happens when the AI returns quantities
+ * summing to less than numberOfLinks. Rows that generated NO anchors can't be topped up
+ * (nothing to split onto) — those are reported via rowsWithNoAnchors.
+ */
+export async function actionReconcilePirogiQuantities(jobId: string): Promise<ReconcilePirogiResult> {
+  const empty = { rowsReconciled: 0, before: 0, after: 0, requested: 0, rowsWithNoAnchors: 0 };
+  const job = await getJob(jobId);
+  if (!job) return { ok: false, message: "Job not found", ...empty };
+  if (job.version !== 3) return { ok: false, message: "Job is not Пироги (v3)", ...empty };
+
+  const inputs = job.inputs ?? [];
+  const anchors = job.anchors ?? [];
+
+  // Group anchors by their input row.
+  const byInput = new Map<string, JobAnchor[]>();
+  for (const a of anchors) {
+    if (!a.inputId) continue;
+    if (!byInput.has(a.inputId)) byInput.set(a.inputId, []);
+    byInput.get(a.inputId)!.push(a);
+  }
+
+  const nById = new Map<string, number>();
+  let requested = 0;
+  for (const i of inputs) {
+    if (!i.payloadV2) continue;
+    nById.set(i.id, i.payloadV2.numberOfLinks);
+    requested += i.payloadV2.numberOfLinks;
+  }
+
+  let before = 0;
+  let after = 0;
+  let rowsReconciled = 0;
+  let rowsWithNoAnchors = 0;
+  const updates: Array<{ id: string; payloadV2: JobAnchor["payloadV2"] }> = [];
+
+  for (const i of inputs) {
+    const list = byInput.get(i.id) ?? [];
+    const K = list.length;
+    const T = nById.get(i.id) ?? list.reduce((s, a) => s + (a.payloadV2?.quantity ?? 1), 0);
+    if (K === 0) { if (T > 0) rowsWithNoAnchors++; continue; }
+
+    const rowBefore = list.reduce((s, a) => s + (a.payloadV2?.quantity ?? 1), 0);
+    before += rowBefore;
+
+    // Even split of T across K anchors (largest-remainder): first `rem` get base+1.
+    const base = Math.floor(T / K);
+    const rem = T - base * K;
+    let changed = false;
+    for (let idx = 0; idx < K; idx++) {
+      const a = list[idx];
+      let nq = base + (idx < rem ? 1 : 0);
+      if (nq === 0) nq = 1; // T < K edge: keep every anchor (accepts a tiny overage)
+      after += nq;
+      const prev = a.payloadV2?.quantity ?? 1;
+      if (nq !== prev) {
+        changed = true;
+        const basePayload = a.payloadV2 ?? { linkType: "", geo: "", lang: "" };
+        updates.push({ id: a.id, payloadV2: { ...basePayload, quantity: nq } });
+      }
+    }
+    if (changed) rowsReconciled++;
+  }
+
+  await setAnchorPayloads(jobId, updates.filter((u) => u.payloadV2 != null) as Array<{ id: string; payloadV2: NonNullable<JobAnchor["payloadV2"]> }>);
+  revalidatePath(`/jobs/${jobId}`);
+
+  const parts = [`Evened out quantities on ${rowsReconciled} row(s). Total is now ${after} of ${requested} requested.`];
+  if (rowsWithNoAnchors > 0) parts.push(`${rowsWithNoAnchors} row(s) generated no anchors and can't be filled — rerun/resume the job to produce them.`);
+  return { ok: true, message: parts.join(" "), rowsReconciled, before, after, requested, rowsWithNoAnchors };
 }
 
 // ----- Manual edits -----
