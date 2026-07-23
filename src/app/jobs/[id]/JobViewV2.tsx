@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, CardBody, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -342,6 +343,11 @@ export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMi
           <CostPill job={job} pricingMissing={pricingMissing} />
         </div>
         <div className="flex items-center gap-1.5">
+          <Link href={`/jobs/${job.id}/edit`}>
+            <Button size="sm" variant="ghost">
+              <Pencil className="h-3.5 w-3.5" /> {t("common.edit")}
+            </Button>
+          </Link>
           <Button size="sm" variant="ghost" onClick={copyAll} disabled={anchors.length === 0}>
             <Copy className="h-3.5 w-3.5" /> {t("common.copy")}
           </Button>
