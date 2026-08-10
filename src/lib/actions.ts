@@ -167,6 +167,40 @@ export async function actionUpdateJob(args: UpdateJobArgs): Promise<void> {
   revalidatePath(`/jobs/${args.id}/edit`);
 }
 
+/**
+ * Save an edited job and land the user back on the job page — in ONE server round-trip.
+ *
+ * Same failure mode (and same fix) as actionCreateJobAndStart: actionUpdateJob calls
+ * revalidatePath() on the edit route the user is currently sitting on, and a client
+ * router.push() issued right after that awaited action races the revalidation and is
+ * routinely swallowed by the App Router. The symptom is "I pressed Save & rerun, the
+ * job restarted, but I stayed on the edit form." Doing the navigation server-side with
+ * redirect() removes the race entirely.
+ *
+ * `start` picks the post-save behaviour:
+ *   - undefined  → save only
+ *   - "rerun"    → full restart (clears anchors, replans every batch)
+ *   - "resume"   → continue from batches_done, preserving existing anchors
+ *
+ * A generation-start failure does NOT block the redirect: we still land on the job page,
+ * which surfaces the error and offers Rerun/Resume. redirect() MUST stay outside the
+ * try/catch — it signals by throwing NEXT_REDIRECT, which the framework needs to see.
+ */
+export async function actionUpdateJobAndGo(
+  args: UpdateJobArgs,
+  start?: "rerun" | "resume"
+): Promise<never> {
+  await actionUpdateJob(args);
+  if (start) {
+    try {
+      await actionStartGeneration(args.id, start === "resume" ? { resume: true } : {});
+    } catch (e) {
+      console.error("[actionUpdateJobAndGo] generation start failed:", e);
+    }
+  }
+  redirect(`/jobs/${args.id}`);
+}
+
 export async function actionDeleteJob(id: string): Promise<void> {
   // Stop any in-process loop for this job before deleting so it doesn't try to
   // operate on a non-existent row mid-batch.

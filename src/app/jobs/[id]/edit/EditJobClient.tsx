@@ -1,17 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { useToast } from "@/components/ui/Toast";
 import { JobForm, type JobFormInitial, type JobFormSubmitArgs } from "@/components/JobForm";
-import { actionStartGeneration, actionUpdateJob } from "@/lib/actions";
+import { actionUpdateJobAndGo } from "@/lib/actions";
 import { rowsToCsv } from "@/lib/anchors/csv";
 import type { Job, SettingsBlob } from "@/lib/types";
 import { useT } from "@/lib/i18n/I18nProvider";
 
 export function EditJobClient({ job, settings }: { job: Job; settings: SettingsBlob }) {
-  const router = useRouter();
-  const { toast } = useToast();
   const { t } = useT();
 
   const initial: JobFormInitial = React.useMemo(() => ({
@@ -28,18 +24,14 @@ export function EditJobClient({ job, settings }: { job: Job; settings: SettingsB
   // failed has no anchors to lose, succeeded was a complete run the user is regenerating.
   const isResumable = job.status === "partial" || job.status === "paused" || job.status === "cancelled";
 
+  // All three actions navigate server-side via actionUpdateJobAndGo. A client
+  // router.push() after the awaited save was raced by revalidatePath() on this very
+  // route and silently dropped, stranding the user on the edit form.
   const saveAndResume = {
     label: t("editJob.saveAndResume"),
     busyLabel: t("editJob.saveAndResumeBusy"),
     onSubmit: async (args: JobFormSubmitArgs) => {
-      await actionUpdateJob({ id: job.id, ...args });
-      const r = await actionStartGeneration(job.id, { resume: true });
-      if (r.ok) {
-        toast(t("jobView.toasts.savedResume"), "info");
-      } else {
-        toast(r.message, "error");
-      }
-      router.push(`/jobs/${job.id}`);
+      await actionUpdateJobAndGo({ id: job.id, ...args }, "resume");
     },
   };
 
@@ -55,14 +47,7 @@ export function EditJobClient({ job, settings }: { job: Job; settings: SettingsB
         const ok = window.confirm(t("editJob.rerunConfirmDestructive", { n: anchorsCount }));
         if (!ok) return;
       }
-      await actionUpdateJob({ id: job.id, ...args });
-      const r = await actionStartGeneration(job.id);
-      if (r.ok) {
-        toast(t("jobView.toasts.savedRerun", { n: r.batchesTotal, plural: r.batchesTotal === 1 ? "" : "es" }), "info");
-      } else {
-        toast(r.message, "error");
-      }
-      router.push(`/jobs/${job.id}`);
+      await actionUpdateJobAndGo({ id: job.id, ...args }, "rerun");
     },
   };
 
@@ -71,9 +56,7 @@ export function EditJobClient({ job, settings }: { job: Job; settings: SettingsB
     busyLabel: t("editJob.saveOnlyBusy"),
     variant: "outline" as const,
     onSubmit: async (args: JobFormSubmitArgs) => {
-      await actionUpdateJob({ id: job.id, ...args });
-      toast(t("jobView.toasts.savedOnly"), "success");
-      router.push(`/jobs/${job.id}`);
+      await actionUpdateJobAndGo({ id: job.id, ...args });
     },
   };
 

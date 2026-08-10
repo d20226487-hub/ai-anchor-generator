@@ -9,15 +9,15 @@ import { Slider } from "@/components/ui/Slider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/Dialog";
 import { useToast } from "@/components/ui/Toast";
 import { actionPreviewPrompt } from "@/lib/actions";
-import { PREDEFINED_MODELS } from "@/lib/settings";
 import { parseCsvText, type CsvRow } from "@/lib/anchors/csv";
+import { CsvFormatHelp } from "@/components/CsvFormatHelp";
+import { V1_CSV_EXAMPLE, v1Columns, v1Notes } from "@/components/csvFormats";
 import type { Brand, JobCriteria, JobMode, ProviderId, SettingsBlob } from "@/lib/types";
 import { SUPPORTED_LANGUAGES } from "@/lib/types";
+import { modelSuggestions, orderedProviders, providerLabel } from "@/lib/providers/labels";
 import { uid, clamp } from "@/lib/utils";
 import { Eye, Plus, Trash2, Upload, ClipboardPaste } from "lucide-react";
 import { useT } from "@/lib/i18n/I18nProvider";
-
-const PROVIDERS: ProviderId[] = ["openrouter", "github", "gemini", "vertex"];
 
 export interface JobFormInitial {
   name: string;
@@ -79,6 +79,12 @@ export function JobForm({
 
   const distSum = genericPct + brandedPct + keywordPct + urlPct;
   const distOk = distSum === 100;
+
+  // Settings → Defaults provider leads the list.
+  const providerOptions = React.useMemo(
+    () => orderedProviders(settings.defaults.providerId),
+    [settings.defaults.providerId]
+  );
 
   React.useEffect(() => {
     if (!csvText.trim()) {
@@ -302,9 +308,17 @@ export function JobForm({
               </div>
               <Textarea
                 rows={10}
-                placeholder={`Target URL,Title,Keywords\nhttps://example.com/page,Example page,seo|backlinks`}
+                placeholder={V1_CSV_EXAMPLE}
                 value={csvText}
                 onChange={(e) => setCsvText(e.target.value)}
+              />
+              {/* Shared by the new AND edit V1 pages; on edit the box already holds the
+                  job's rows, so only offer the example when it's empty. */}
+              <CsvFormatHelp
+                columns={v1Columns(t)}
+                notes={v1Notes(t)}
+                example={V1_CSV_EXAMPLE}
+                onInsertExample={csvText.trim() ? undefined : setCsvText}
               />
               {parseErrors.length > 0 && (
                 <div className="rounded-md border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 p-3 text-xs text-[var(--color-danger)] space-y-1">
@@ -337,8 +351,8 @@ export function JobForm({
               <div>
                 <Label>{t("form.provider")}</Label>
                 <Select className="mt-1" value={providerId} onChange={(e) => handleProviderChange(e.target.value as ProviderId)}>
-                  {PROVIDERS.map((p) => (
-                    <option key={p} value={p}>{labelFor(p)}</option>
+                  {providerOptions.map((p) => (
+                    <option key={p} value={p}>{providerLabel(p)}</option>
                   ))}
                 </Select>
               </div>
@@ -351,9 +365,7 @@ export function JobForm({
                   list={`models-list-${providerId}`}
                 />
                 <datalist id={`models-list-${providerId}`}>
-                  {Array.from(
-                    new Set([...(PREDEFINED_MODELS[providerId] ?? []), ...(settings.customModels[providerId] ?? [])])
-                  ).map((m) => (
+                  {modelSuggestions(providerId, settings).map((m) => (
                     <option key={m} value={m} />
                   ))}
                 </datalist>
@@ -361,7 +373,7 @@ export function JobForm({
               </div>
               {!settings.providers[providerId]?.apiKey && (
                 <div className="rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 p-2 text-xs text-[var(--color-warn)]">
-                  {t("form.noApiKey", { provider: labelFor(providerId) })}
+                  {t("form.noApiKey", { provider: providerLabel(providerId) })}
                 </div>
               )}
             </CardBody>
@@ -402,10 +414,6 @@ export function JobForm({
       </div>
     </div>
   );
-}
-
-function labelFor(p: ProviderId): string {
-  return p === "openrouter" ? "OpenRouter" : p === "github" ? "GitHub Models" : "Google Gemini";
 }
 
 function DistRow({ label, value, onChange }: { label: string; value: number; onChange: (n: number) => void }) {

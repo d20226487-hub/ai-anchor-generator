@@ -11,25 +11,14 @@ import { useT } from "@/lib/i18n/I18nProvider";
 import { useDisplayName } from "@/components/DisplayNameProvider";
 import { actionCreateJobAndStart, actionPreviewPromptPirogi } from "@/lib/actions";
 import { parseCsvTextV2, type CsvRowV2 } from "@/lib/anchors/csv_v2";
-import { PREDEFINED_MODELS } from "@/lib/settings";
+import { CsvFormatHelp } from "@/components/CsvFormatHelp";
+import { PIROGI_CSV_EXAMPLE, v2Columns, v2Notes } from "@/components/csvFormats";
+import { modelSuggestions, orderedProviders, providerLabel } from "@/lib/providers/labels";
 import type { ProviderId, SettingsBlob } from "@/lib/types";
 import { Eye, Upload, Loader2 } from "lucide-react";
 
-const PROVIDERS: ProviderId[] = ["openrouter", "github", "gemini", "vertex"];
-
-function labelFor(p: ProviderId): string {
-  return p === "openrouter" ? "OpenRouter"
-    : p === "github" ? "GitHub Models"
-    : p === "gemini" ? "Google Gemini"
-    : "Google Vertex AI";
-}
-
 // Link Type is OPTIONAL in Пироги (the deliverable CSV drops it). Header and per-row
 // cell may be omitted; the V2 parser is invoked below with linkTypeRequired: false.
-const PIROGI_CSV_PLACEHOLDER = `Target URL,Number of links,URL,Brand,Generic,Keyword,GEO,Lang
-https://example1.com,800,0,75,15,10,Russia,RU
-https://example2.com,400,0,75,15,10,Russia,RU`;
-
 /**
  * Пироги (v3) new-job form. Accepts the same V2 CSV input shape (per-row Link Type,
  * Number of links, distribution %, GEO, Lang). The difference vs V2 is downstream:
@@ -60,6 +49,12 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
     if (!csvText.trim()) return { rows: [] as CsvRowV2[], errors: [] as string[], warnings: [] as string[], skipped: 0 };
     return parseCsvTextV2(csvText, { linkTypeRequired: false });
   }, [csvText]);
+
+  // Settings → Defaults provider leads the list.
+  const providerOptions = React.useMemo(
+    () => orderedProviders(settings.defaults.providerId),
+    [settings.defaults.providerId]
+  );
 
   function handleProviderChange(p: ProviderId) {
     setProviderId(p);
@@ -197,7 +192,7 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => setCsvText(PIROGI_CSV_PLACEHOLDER.split("\n")[0])}
+                  onClick={() => setCsvText(PIROGI_CSV_EXAMPLE.split("\n")[0])}
                   title={t("form.insertHeaders")}
                 >
                   {t("form.insertHeaders")}
@@ -207,7 +202,13 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
                   {t("common.clear")}
                 </Button>
               </div>
-              <Textarea rows={12} placeholder={PIROGI_CSV_PLACEHOLDER} value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+              <Textarea rows={12} placeholder={PIROGI_CSV_EXAMPLE} value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+              <CsvFormatHelp
+                columns={v2Columns(t, { linkTypeRequired: false })}
+                notes={v2Notes(t)}
+                example={PIROGI_CSV_EXAMPLE}
+                onInsertExample={setCsvText}
+              />
 
               {parsed.errors.length > 0 && (
                 <div className="rounded-md border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 p-3 text-xs text-[var(--color-danger)] space-y-1">
@@ -275,7 +276,7 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
               <div>
                 <Label>{t("form.provider")}</Label>
                 <Select className="mt-1" value={providerId} onChange={(e) => handleProviderChange(e.target.value as ProviderId)}>
-                  {PROVIDERS.map((p) => <option key={p} value={p}>{labelFor(p)}</option>)}
+                  {providerOptions.map((p) => <option key={p} value={p}>{providerLabel(p)}</option>)}
                 </Select>
               </div>
               <div>
@@ -287,7 +288,7 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
                   list={`v3-models-list-${providerId}`}
                 />
                 <datalist id={`v3-models-list-${providerId}`}>
-                  {Array.from(new Set([...(PREDEFINED_MODELS[providerId] ?? []), ...(settings.customModels[providerId] ?? [])])).map((m) => (
+                  {modelSuggestions(providerId, settings).map((m) => (
                     <option key={m} value={m} />
                   ))}
                 </datalist>
@@ -295,7 +296,7 @@ export function NewJobPirogiClient({ settings }: { settings: SettingsBlob }) {
               </div>
               {noKey && (
                 <div className="rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 p-2 text-xs text-[var(--color-warn)]">
-                  {t("form.noApiKey", { provider: labelFor(providerId) })}
+                  {t("form.noApiKey", { provider: providerLabel(providerId) })}
                 </div>
               )}
             </CardBody>

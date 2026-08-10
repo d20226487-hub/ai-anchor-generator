@@ -197,7 +197,8 @@ export interface Folder {
 
 /** Folder + counts used to render rows in the folder browser. */
 export interface FolderRow extends Folder {
-  /** Live jobs in this folder + ALL descendants (recursive). */
+  /** Live jobs DIRECTLY in this folder — not recursive. Matches what you see after
+   *  clicking into it (see listFolderRows). */
   jobCount: number;
   /** Live direct child folders. */
   subfolderCount: number;

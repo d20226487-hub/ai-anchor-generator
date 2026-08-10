@@ -34,51 +34,48 @@ export const DEFAULT_SETTINGS: SettingsBlob = {
       regeneration: DEFAULT_REGENERATION_PROMPT_PIROGI,
     },
   },
+  // Fresh-install defaults only. mergeSettings lets anything already stored in the DB
+  // win, so editing these never overwrites a deployment's configured defaults.
   defaults: {
-    providerId: "openrouter",
+    providerId: "gemini",
     modelByProvider: {
-      openrouter: "openai/gpt-4o-mini",
-      github: "openai/gpt-4o-mini",
-      gemini: "gemini-2.0-flash",
-      vertex: "gemini-2.0-flash-001",
+      openrouter: "meta-llama/llama-3.3-70b-instruct",
+      github: "openai/gpt-4.1-mini",
+      gemini: "gemini-3.1-flash-lite",
+      vertex: "gemini-3.1-flash-lite",
     },
   },
   locale: "en",
   theme: "dark",
 };
 
+/**
+ * Suggestions shown in Settings → Models and in every job form's model datalist.
+ *
+ * Deliberately SHORT. This list is a convenience, not an allowlist — the model field is
+ * free text, so anything a provider serves can be typed (or pinned via Settings → Models
+ * → Custom models). Superseded Gemini 1.5/2.0/2.5 and Claude 3.5 entries were removed
+ * 2026-08-10 because they cluttered the picker and nobody ran them.
+ *
+ * Keep this curated: add a model when the team actually adopts it, and drop it when the
+ * provider retires it. A stale suggestion is worse than a missing one — it silently
+ * sends a dead model ID to the API and the batch fails mid-run.
+ */
 export const PREDEFINED_MODELS: Record<string, string[]> = {
   openrouter: [
-    "openai/gpt-4o-mini",
-    "openai/gpt-4o",
-    "anthropic/claude-3.5-sonnet",
-    "anthropic/claude-3.5-haiku",
-    "google/gemini-2.0-flash-001",
     "meta-llama/llama-3.3-70b-instruct",
     "deepseek/deepseek-chat",
   ],
   github: [
-    "openai/gpt-4o-mini",
-    "openai/gpt-4o",
+    "openai/gpt-4.1-mini",
     "meta/Llama-3.3-70B-Instruct",
-    "mistral-ai/Mistral-large",
-    "xai/grok-3-mini",
   ],
   gemini: [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
   ],
   vertex: [
-    // Gemini 2.5+ on Vertex auto-applies implicit prompt caching ≥1024-token prefixes.
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash-001",
-    "gemini-2.0-flash-lite-001",
-    // Anthropic Claude is also served on Vertex with the same generateContent shape.
-    "claude-3-5-sonnet-v2@20241022",
-    "claude-3-5-haiku@20241022",
+    "gemini-3.1-flash-lite",
   ],
 };
 

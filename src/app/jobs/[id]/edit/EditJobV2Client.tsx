@@ -1,27 +1,19 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
 import { Card, CardBody, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select, Textarea } from "@/components/ui/Input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/Dialog";
 import { useToast } from "@/components/ui/Toast";
 import { useT } from "@/lib/i18n/I18nProvider";
-import { actionPreviewPromptV2, actionStartGeneration, actionUpdateJob } from "@/lib/actions";
+import { actionPreviewPromptV2, actionUpdateJobAndGo } from "@/lib/actions";
 import { parseCsvTextV2, type CsvRowV2, v2InputsToCsv } from "@/lib/anchors/csv_v2";
-import { PREDEFINED_MODELS } from "@/lib/settings";
+import { CsvFormatHelp } from "@/components/CsvFormatHelp";
+import { V2_CSV_EXAMPLE, v2Columns, v2Notes } from "@/components/csvFormats";
+import { modelSuggestions, orderedProviders, providerLabel } from "@/lib/providers/labels";
 import type { Job, ProviderId, SettingsBlob } from "@/lib/types";
 import { Eye, Upload, Loader2 } from "lucide-react";
-
-const PROVIDERS: ProviderId[] = ["openrouter", "github", "gemini", "vertex"];
-
-function labelFor(p: ProviderId): string {
-  return p === "openrouter" ? "OpenRouter"
-    : p === "github" ? "GitHub Models"
-    : p === "gemini" ? "Google Gemini"
-    : "Google Vertex AI";
-}
 
 /**
  * V2 edit form. Mirrors EditJobPirogiClient but for the V2 flow:
@@ -34,7 +26,6 @@ function labelFor(p: ProviderId): string {
  * status-aware pattern as V1 and Пироги. CSV pre-fill via v2InputsToCsv (9-column shape).
  */
 export function EditJobV2Client({ job, settings }: { job: Job; settings: SettingsBlob }) {
-  const router = useRouter();
   const { toast } = useToast();
   const { t } = useT();
 
@@ -52,6 +43,12 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
     if (!csvText.trim()) return { rows: [] as CsvRowV2[], errors: [] as string[], warnings: [] as string[], skipped: 0 };
     return parseCsvTextV2(csvText);
   }, [csvText]);
+
+  // Settings → Defaults provider leads the list.
+  const providerOptions = React.useMemo(
+    () => orderedProviders(settings.defaults.providerId),
+    [settings.defaults.providerId]
+  );
 
   function handleProviderChange(p: ProviderId) {
     setProviderId(p);
@@ -93,8 +90,15 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
     });
   }
 
-  async function persist() {
-    await actionUpdateJob({
+  /**
+   * Save, optionally (re)start generation, then redirect to the job page FROM THE SERVER.
+   *
+   * The redirect has to happen server-side: actionUpdateJob revalidates this very route,
+   * and a client router.push() right after it gets swallowed by the App Router, leaving
+   * the user sitting on the edit form. See actionUpdateJobAndGo.
+   */
+  async function persistAndGo(start?: "rerun" | "resume") {
+    await actionUpdateJobAndGo({
       id: job.id,
       name: name.trim() || t("common.untitled"),
       mode: "one_site",
@@ -110,7 +114,7 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
         keywords: null,
         payloadV2: r.payloadV2,
       })),
-    });
+    }, start);
   }
 
   function validate(): boolean {
@@ -124,9 +128,7 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
     if (!validate()) return;
     setBusy("saveOnly");
     try {
-      await persist();
-      toast(t("jobView.toasts.savedOnly"), "success");
-      router.push(`/jobs/${job.id}`);
+      await persistAndGo();
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
       setBusy(null);
@@ -137,11 +139,7 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
     if (!validate()) return;
     setBusy("saveResume");
     try {
-      await persist();
-      const r = await actionStartGeneration(job.id, { resume: true });
-      if (r.ok) toast(t("jobView.toasts.savedResume"), "info");
-      else toast(r.message, "error");
-      router.push(`/jobs/${job.id}`);
+      await persistAndGo("resume");
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
       setBusy(null);
@@ -157,11 +155,7 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
     }
     setBusy("saveRerun");
     try {
-      await persist();
-      const r = await actionStartGeneration(job.id);
-      if (r.ok) toast(t("jobView.toasts.savedRerun", { n: r.batchesTotal, plural: r.batchesTotal === 1 ? "" : "es" }), "info");
-      else toast(r.message, "error");
-      router.push(`/jobs/${job.id}`);
+      await persistAndGo("rerun");
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
       setBusy(null);
@@ -221,7 +215,13 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
                   {t("common.clear")}
                 </Button>
               </div>
-              <Textarea rows={12} value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+              <Textarea rows={12} placeholder={V2_CSV_EXAMPLE} value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+              {/* No "insert example" here — the box holds the job's saved rows. */}
+              <CsvFormatHelp
+                columns={v2Columns(t, { linkTypeRequired: true })}
+                notes={v2Notes(t)}
+                example={V2_CSV_EXAMPLE}
+              />
 
               {parsed.errors.length > 0 && (
                 <div className="rounded-md border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 p-3 text-xs text-[var(--color-danger)] space-y-1">
@@ -289,7 +289,7 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
               <div>
                 <Label>{t("form.provider")}</Label>
                 <Select className="mt-1" value={providerId} onChange={(e) => handleProviderChange(e.target.value as ProviderId)}>
-                  {PROVIDERS.map((p) => <option key={p} value={p}>{labelFor(p)}</option>)}
+                  {providerOptions.map((p) => <option key={p} value={p}>{providerLabel(p)}</option>)}
                 </Select>
               </div>
               <div>
@@ -301,7 +301,7 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
                   list={`edit-v2-models-list-${providerId}`}
                 />
                 <datalist id={`edit-v2-models-list-${providerId}`}>
-                  {Array.from(new Set([...(PREDEFINED_MODELS[providerId] ?? []), ...(settings.customModels[providerId] ?? [])])).map((m) => (
+                  {modelSuggestions(providerId, settings).map((m) => (
                     <option key={m} value={m} />
                   ))}
                 </datalist>
@@ -309,7 +309,7 @@ export function EditJobV2Client({ job, settings }: { job: Job; settings: Setting
               </div>
               {noKey && (
                 <div className="rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 p-2 text-xs text-[var(--color-warn)]">
-                  {t("form.noApiKey", { provider: labelFor(providerId) })}
+                  {t("form.noApiKey", { provider: providerLabel(providerId) })}
                 </div>
               )}
             </CardBody>

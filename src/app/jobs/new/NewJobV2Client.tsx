@@ -11,28 +11,11 @@ import { useT } from "@/lib/i18n/I18nProvider";
 import { useDisplayName } from "@/components/DisplayNameProvider";
 import { actionCreateJobAndStart, actionPreviewPromptV2 } from "@/lib/actions";
 import { parseCsvTextV2, type CsvRowV2 } from "@/lib/anchors/csv_v2";
-import { PREDEFINED_MODELS } from "@/lib/settings";
+import { CsvFormatHelp } from "@/components/CsvFormatHelp";
+import { V2_CSV_EXAMPLE, v2Columns, v2Notes } from "@/components/csvFormats";
+import { modelSuggestions, orderedProviders, providerLabel } from "@/lib/providers/labels";
 import type { ProviderId, SettingsBlob } from "@/lib/types";
 import { Eye, Upload, Loader2 } from "lucide-react";
-
-const PROVIDERS: ProviderId[] = ["openrouter", "github", "gemini", "vertex"];
-
-function labelFor(p: ProviderId): string {
-  return p === "openrouter" ? "OpenRouter"
-    : p === "github" ? "GitHub Models"
-    : p === "gemini" ? "Google Gemini"
-    : "Google Vertex AI";
-}
-
-// Lang accepts one or more codes. Multiple = a per-row language split:
-//   RU              → 100% RU
-//   RU/KZ/UZ        → equal thirds
-//   RU:50/KZ:30/UZ:20 → weighted
-//   RU:60/KZ        → RU 60%, KZ gets the remaining 40%
-const V2_CSV_PLACEHOLDER = `Target URL,Link Type,Number of links,URL,Brand,Generic,Keyword,GEO,Lang
-https://example.com,Web 2.0,30,100,0,0,0,Russia,RU
-https://example.com,Comment,30,0,100,0,0,Kazakhstan/Russia,RU:60/KZ:40
-https://example.com,Profile,5,0,0,50,50,CIS,RU/KZ/UZ`;
 
 export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
   const searchParams = useSearchParams();
@@ -57,6 +40,12 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
     if (!csvText.trim()) return { rows: [] as CsvRowV2[], errors: [] as string[], warnings: [] as string[], skipped: 0 };
     return parseCsvTextV2(csvText);
   }, [csvText]);
+
+  // Settings → Defaults provider leads the list.
+  const providerOptions = React.useMemo(
+    () => orderedProviders(settings.defaults.providerId),
+    [settings.defaults.providerId]
+  );
 
   function handleProviderChange(p: ProviderId) {
     setProviderId(p);
@@ -199,7 +188,7 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => setCsvText(V2_CSV_PLACEHOLDER.split("\n")[0])}
+                  onClick={() => setCsvText(V2_CSV_EXAMPLE.split("\n")[0])}
                   title={t("form.insertHeaders")}
                 >
                   {t("form.insertHeaders")}
@@ -209,7 +198,13 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
                   {t("common.clear")}
                 </Button>
               </div>
-              <Textarea rows={12} placeholder={V2_CSV_PLACEHOLDER} value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+              <Textarea rows={12} placeholder={V2_CSV_EXAMPLE} value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+              <CsvFormatHelp
+                columns={v2Columns(t, { linkTypeRequired: true })}
+                notes={v2Notes(t)}
+                example={V2_CSV_EXAMPLE}
+                onInsertExample={setCsvText}
+              />
 
               {parsed.errors.length > 0 && (
                 <div className="rounded-md border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 p-3 text-xs text-[var(--color-danger)] space-y-1">
@@ -279,7 +274,7 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
               <div>
                 <Label>{t("form.provider")}</Label>
                 <Select className="mt-1" value={providerId} onChange={(e) => handleProviderChange(e.target.value as ProviderId)}>
-                  {PROVIDERS.map((p) => <option key={p} value={p}>{labelFor(p)}</option>)}
+                  {providerOptions.map((p) => <option key={p} value={p}>{providerLabel(p)}</option>)}
                 </Select>
               </div>
               <div>
@@ -291,7 +286,7 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
                   list={`v2-models-list-${providerId}`}
                 />
                 <datalist id={`v2-models-list-${providerId}`}>
-                  {Array.from(new Set([...(PREDEFINED_MODELS[providerId] ?? []), ...(settings.customModels[providerId] ?? [])])).map((m) => (
+                  {modelSuggestions(providerId, settings).map((m) => (
                     <option key={m} value={m} />
                   ))}
                 </datalist>
@@ -299,7 +294,7 @@ export function NewJobV2Client({ settings }: { settings: SettingsBlob }) {
               </div>
               {noKey && (
                 <div className="rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 p-2 text-xs text-[var(--color-warn)]">
-                  {t("form.noApiKey", { provider: labelFor(providerId) })}
+                  {t("form.noApiKey", { provider: providerLabel(providerId) })}
                 </div>
               )}
             </CardBody>

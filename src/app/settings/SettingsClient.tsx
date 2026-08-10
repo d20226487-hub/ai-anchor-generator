@@ -26,7 +26,7 @@ const PROVIDERS: { id: ProviderId; label: string; helpUrl: string; hint?: string
   { id: "openrouter", label: "OpenRouter", helpUrl: "https://openrouter.ai/keys", hint: "Models use lowercase hyphenated IDs, e.g. meta-llama/llama-3.3-70b-instruct" },
   { id: "github", label: "GitHub Models", helpUrl: "https://github.com/settings/personal-access-tokens", hint: "Use a fine-grained PAT with the \"Models\" permission (read), or a classic PAT. Models use mixed-case IDs, e.g. meta/Llama-3.3-70B-Instruct" },
   { id: "gemini", label: "Google Gemini", helpUrl: "https://aistudio.google.com/apikey" },
-  { id: "vertex", label: "Google Vertex AI", helpUrl: "https://console.cloud.google.com/vertex-ai", hint: "Two auth modes: paste a Service Account JSON (recommended — enterprise project + region + implicit prompt caching on Gemini 2.5+), or just provide an Express API key. Models use Vertex names, e.g. gemini-2.5-pro" },
+  { id: "vertex", label: "Google Vertex AI", helpUrl: "https://console.cloud.google.com/vertex-ai", hint: "Two auth modes: paste a Service Account JSON (recommended — enterprise project + region + implicit prompt caching on Gemini 2.5+), or just provide an Express API key. Models use Vertex names, e.g. gemini-3.1-flash-lite" },
 ];
 
 export function SettingsClient({ initial }: { initial: SettingsBlob }) {
@@ -613,7 +613,7 @@ function ModelsCard({
             <Input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder="e.g. anthropic/claude-3-opus"
+              placeholder="e.g. gemini-3.1-flash-lite"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && draft.trim()) {
                   onChange([...custom, draft.trim()]);

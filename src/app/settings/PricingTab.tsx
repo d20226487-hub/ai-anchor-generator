@@ -12,16 +12,8 @@ import {
   actionSaveModelPricing,
 } from "@/lib/actions";
 import type { ModelPricing, ProviderId } from "@/lib/types";
+import { ALL_PROVIDERS as PROVIDERS, providerLabel } from "@/lib/providers/labels";
 import { Plus, Save, Trash2 } from "lucide-react";
-
-const PROVIDERS: ProviderId[] = ["openrouter", "github", "gemini", "vertex"];
-
-function providerLabel(p: ProviderId): string {
-  return p === "openrouter" ? "OpenRouter"
-    : p === "github" ? "GitHub Models"
-    : p === "gemini" ? "Google Gemini"
-    : "Google Vertex AI";
-}
 
 /**
  * Edit per-(provider, model) AI pricing. Rates are USD per 1 MILLION tokens (matches
@@ -210,7 +202,7 @@ export function PricingTab() {
             </div>
             <div className="col-span-4">
               <Label className="text-xs">{t("settings.pricing.colModel")}</Label>
-              <Input className="mt-1 h-8 font-mono text-xs" value={newModel} onChange={(e) => setNewModel(e.target.value)} placeholder="e.g. openai/gpt-4o-mini" />
+              <Input className="mt-1 h-8 font-mono text-xs" value={newModel} onChange={(e) => setNewModel(e.target.value)} placeholder="e.g. gemini-3.1-flash-lite" />
             </div>
             <div className="col-span-2">
               <Label className="text-xs">{t("settings.pricing.colInput")}</Label>

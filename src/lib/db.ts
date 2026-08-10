@@ -145,34 +145,18 @@ const POST_MIGRATION_INDEXES = [
 // user can edit in Settings and we won't overwrite. Values are approximate list prices
 // from each provider's docs (Q2-2026); verify before relying on absolute accuracy. The
 // user can override via Settings → Pricing.
+// Kept in step with PREDEFINED_MODELS in settings.ts — a pricing row for a model nobody
+// can pick is just clutter in Settings → Pricing. Superseded Gemini 1.5/2.0/2.5 and
+// Claude 3.5 rows were dropped 2026-08-10. Rows for models missing here still work:
+// an unpriced model simply records 0 cost until someone adds a rate in Settings.
 const DEFAULT_PRICING: Array<{ provider: string; model: string; input: number; output: number }> = [
   // OpenRouter — list prices (markup is ~5.5% on top, accept it as noise)
-  { provider: "openrouter", model: "openai/gpt-4o-mini",                  input: 0.15,  output: 0.60 },
-  { provider: "openrouter", model: "openai/gpt-4o",                       input: 2.50,  output: 10.00 },
-  { provider: "openrouter", model: "anthropic/claude-3.5-sonnet",         input: 3.00,  output: 15.00 },
-  { provider: "openrouter", model: "anthropic/claude-3.5-haiku",          input: 0.80,  output: 4.00 },
-  { provider: "openrouter", model: "google/gemini-2.0-flash-001",         input: 0.10,  output: 0.40 },
   { provider: "openrouter", model: "meta-llama/llama-3.3-70b-instruct",   input: 0.13,  output: 0.40 },
   { provider: "openrouter", model: "deepseek/deepseek-chat",              input: 0.27,  output: 1.10 },
   // GitHub Models — free tier with rate limits; 0/0 reflects "no charge" for most users.
   // Override in Settings if you're on a paid tier.
-  { provider: "github",     model: "openai/gpt-4o-mini",                  input: 0,     output: 0 },
-  { provider: "github",     model: "openai/gpt-4o",                       input: 0,     output: 0 },
+  { provider: "github",     model: "openai/gpt-4.1-mini",                 input: 0,     output: 0 },
   { provider: "github",     model: "meta/Llama-3.3-70B-Instruct",         input: 0,     output: 0 },
-  { provider: "github",     model: "mistral-ai/Mistral-large",            input: 0,     output: 0 },
-  { provider: "github",     model: "xai/grok-3-mini",                     input: 0,     output: 0 },
-  // Google Gemini (public AI Studio API)
-  { provider: "gemini",     model: "gemini-2.0-flash",                    input: 0.075, output: 0.30 },
-  { provider: "gemini",     model: "gemini-2.0-flash-lite",               input: 0.075, output: 0.30 },
-  { provider: "gemini",     model: "gemini-1.5-flash",                    input: 0.075, output: 0.30 },
-  { provider: "gemini",     model: "gemini-1.5-pro",                      input: 1.25,  output: 5.00 },
-  // Google Vertex AI (enterprise — different rates from public Gemini API)
-  { provider: "vertex",     model: "gemini-2.5-pro",                      input: 1.25,  output: 10.00 },
-  { provider: "vertex",     model: "gemini-2.5-flash",                    input: 0.30,  output: 2.50 },
-  { provider: "vertex",     model: "gemini-2.0-flash-001",                input: 0.10,  output: 0.40 },
-  { provider: "vertex",     model: "gemini-2.0-flash-lite-001",           input: 0.075, output: 0.30 },
-  { provider: "vertex",     model: "claude-3-5-sonnet-v2@20241022",       input: 3.00,  output: 15.00 },
-  { provider: "vertex",     model: "claude-3-5-haiku@20241022",           input: 0.80,  output: 4.00 },
 ];
 
 async function init(): Promise<void> {

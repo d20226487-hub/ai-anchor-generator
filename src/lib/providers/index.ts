@@ -1,4 +1,5 @@
 import type { ProviderId, ProviderUsage, SettingsBlob } from "../types";
+import { DEFAULT_SETTINGS } from "../settings";
 import { callOpenAICompatible } from "./openai-compat";
 import { callGemini } from "./gemini";
 import { callGitHubModels } from "./github";
@@ -72,13 +73,10 @@ function nonEmpty(s: string | null | undefined): string | null {
   return t.length === 0 ? null : t;
 }
 
-// Hardcoded fallbacks if the user hasn't set a per-provider default.
-const PING_FALLBACK: Record<ProviderId, string> = {
-  openrouter: "openai/gpt-4o-mini",
-  github: "openai/gpt-4o-mini",
-  gemini: "gemini-2.0-flash",
-  vertex: "gemini-2.0-flash-001",
-};
+// Fallback models for "Test connection" when the user hasn't set a per-provider default.
+// Sourced from DEFAULT_SETTINGS so trimming the model lists can't leave this pointing at
+// a retired model — which would fail the connection test on a perfectly valid API key.
+const PING_FALLBACK: Record<ProviderId, string> = DEFAULT_SETTINGS.defaults.modelByProvider;
 
 export async function pingProvider(providerId: ProviderId, settings: SettingsBlob): Promise<{ ok: boolean; message: string }> {
   try {

@@ -29,9 +29,12 @@ const POLL_INTERVAL_MS = 2500;
 const PAGE_SIZES: ReadonlyArray<50 | 100 | 200 | 500 | 1000> = [50, 100, 200, 500, 1000];
 
 /**
- * V2 Job View — leaner than V1. No comparison panel, no rebalance, no quick-fix,
- * no regenerate (yet). Just: job header, run status, and an anchors table with
- * the five V2 columns (URL, Type, Anchor, GEO, Lang).
+ * V2 Job View. Job header, run status, a per-(URL × Link Type) overview panel with
+ * per-row rebalance, regenerate for selected anchors, and the anchors table
+ * (URL, Type, Anchor, Anchor type, GEO, Lang).
+ *
+ * Unlike V1 there is no per-anchor manual editing and no dofollow/nofollow column —
+ * V2 drops the follow ratio entirely and its distribution is per input row.
  */
 export function JobViewV2({ job, pricingMissing = false }: { job: Job; pricingMissing?: boolean }) {
   const router = useRouter();
