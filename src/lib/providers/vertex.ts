@@ -13,6 +13,7 @@
 // restructured prompts.ts template puts all stable content first to maximize cache hits.
 
 import { JWT } from "google-auth-library";
+import { describeFetchError } from "./errors";
 
 interface Args {
   serviceAccountJson?: string;
@@ -129,7 +130,9 @@ export async function callVertex(args: Args): Promise<CallResult> {
     if (e instanceof Error && (e.name === "TimeoutError" || /timeout/i.test(msg))) {
       throw new Error(`Vertex AI: timed out after ${timeoutMs / 1000}s waiting for response`);
     }
-    throw new Error(`Vertex AI: network error — ${msg}`);
+    // Include the underlying cause — a bare "fetch failed" hides whether this was DNS,
+    // a refused proxy, or TLS, which is exactly what you need to fix it.
+    throw new Error(`Vertex AI: network error reaching aiplatform.googleapis.com — ${describeFetchError(e)}`);
   }
 
   const text = await res.text();
@@ -172,10 +175,22 @@ export async function callVertex(args: Args): Promise<CallResult> {
   };
 }
 
-/** Free test-connection — lists publisher models without burning quota. Mirrors
- *  Drop Sherlock's _test_service_account / _test_api_key. */
+/**
+ * Test-connection probe.
+ *
+ * Service-account mode lists publisher models on the regional endpoint — free, no quota.
+ *
+ * Express (API-key) mode CANNOT use that listing: the global
+ * `aiplatform.googleapis.com/v1/publishers/google/models` collection doesn't exist for
+ * Express keys and answers 404 with an HTML error page, so "Test connection" reported
+ * failure for perfectly valid keys that generate anchors fine. Express therefore probes
+ * with a 1-token generateContent call against the model the job would actually use —
+ * a couple of tokens, and it verifies the exact path generation depends on.
+ */
 export async function pingVertex(args: {
   serviceAccountJson?: string; apiKey?: string; projectId?: string; location?: string; timeoutMs: number;
+  /** Model to probe in Express mode. Falls back to the caller's configured default. */
+  model?: string;
 }): Promise<{ ok: boolean; message: string }> {
   const sa = (args.serviceAccountJson ?? "").trim();
   const apiKey = (args.apiKey ?? "").trim();
@@ -194,8 +209,29 @@ export async function pingVertex(args: {
       url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models`;
       mode = "service-account";
     } else if (apiKey) {
-      url = `https://aiplatform.googleapis.com/v1/publishers/google/models?key=${encodeURIComponent(apiKey)}`;
-      mode = "express (API key)";
+      const model = (args.model ?? "").trim();
+      if (!model) return { ok: false, message: "Vertex AI: no model configured to test against (set one in Settings → Defaults)" };
+      const probeUrl = `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const probe = await fetch(probeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Reply with OK." }] }],
+          generationConfig: { maxOutputTokens: 1 },
+        }),
+        signal: AbortSignal.timeout(args.timeoutMs),
+      });
+      const probeText = await probe.text();
+      if (probe.status === 401 || probe.status === 403) {
+        return { ok: false, message: `Vertex AI rejected credentials (${probe.status}): ${probeText.slice(0, 200)}` };
+      }
+      if (probe.status === 404) {
+        return { ok: false, message: `Vertex AI: model "${model}" not available for this Express key (404).` };
+      }
+      if (!probe.ok) {
+        return { ok: false, message: `Vertex AI returned ${probe.status}: ${probeText.slice(0, 200)}` };
+      }
+      return { ok: true, message: `OK — Vertex AI reachable (express (API key), model "${model}" responded)` };
     } else {
       return { ok: false, message: "Vertex AI: no credentials configured (need either Service Account JSON or API key)" };
     }
@@ -214,6 +250,6 @@ export async function pingVertex(args: {
     } catch { /* ignore */ }
     return { ok: true, message: `OK — Vertex AI reachable (${mode}, ${count} publisher models)` };
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, message: describeFetchError(e) };
   }
 }

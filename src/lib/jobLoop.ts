@@ -27,7 +27,18 @@ import { matchBrand } from "./anchors/brands";
 import { parseAnchorsResponse, parseAnchorsResponsePirogi, parseAnchorsResponseV2 } from "./anchors/parse";
 import { resolveProviderLimits } from "./providers/limits";
 
-const RATE_LIMIT_HINTS = /rate|429|too many requests|quota/i;
+// Matched against provider error TEXT to decide "retry with backoff" vs "give up".
+//
+// `rate` used to be a bare alternative here, which also matched the substring inside
+// "geneRATEContent" — every Gemini/Vertex URL ends in ":generateContent", so ANY failure
+// on those providers (including a TLS error that can never succeed) was misread as a rate
+// limit and retried forever. The job sat at `running` with 0 tokens and never surfaced the
+// real cause. Anchored to the actual phrases now.
+const RATE_LIMIT_HINTS = /\b429\b|rate[ _-]?limit|too many requests|quota|resource[ _-]?exhausted/i;
+
+// Transport failures that will NEVER fix themselves by waiting: bad TLS chain, DNS,
+// refused connection. Fail fast with the real reason instead of backing off in a loop.
+const FATAL_NETWORK_HINTS = /UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT|CERT_|ENOTFOUND|ECONNREFUSED|EPROTO|DEPTH_ZERO_SELF_SIGNED_CERT/i;
 
 // One AbortController per running job. Used by stopJobLoop to signal the loop to exit
 // at the next batch boundary. The current in-flight AI call is NOT aborted — we let it
@@ -215,7 +226,7 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
     usage = result.usage;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    if (RATE_LIMIT_HINTS.test(message)) {
+    if (RATE_LIMIT_HINTS.test(message) && !FATAL_NETWORK_HINTS.test(message)) {
       // Surface the rate-limit reason to the UI even though the loop will retry. Without
       // this `lastError` stays null and the user sees "running, no progress" with no clue
       // why. Status stays "running" so the loop keeps the lease and continues retrying.
@@ -371,7 +382,7 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
     usageV2 = result.usage;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    if (RATE_LIMIT_HINTS.test(message)) {
+    if (RATE_LIMIT_HINTS.test(message) && !FATAL_NETWORK_HINTS.test(message)) {
       await setJobStatus(jobId, "running", {
         lastError: `Rate-limited at batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying with backoff…`,
       });
@@ -521,7 +532,7 @@ export async function processBatchPirogi(jobId: string, batchIndex: number, runn
     usagePirogi = result.usage;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    if (RATE_LIMIT_HINTS.test(message)) {
+    if (RATE_LIMIT_HINTS.test(message) && !FATAL_NETWORK_HINTS.test(message)) {
       await setJobStatus(jobId, "running", {
         lastError: `Rate-limited at batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying with backoff…`,
       });

@@ -2,10 +2,11 @@
   "name": "ai-anchor-generator",
   "version": "0.1.0",
   "private": true,
+  "comment_scripts": "dev/start go through scripts/run-next.mjs, which exports --use-system-ca via NODE_OPTIONS so Next's spawned server worker trusts the OS certificate store. Without it, antivirus HTTPS scanning (Avast/Kaspersky/ESET/Zscaler) makes every provider call fail as 'fetch failed' / UNABLE_TO_VERIFY_LEAF_SIGNATURE. See the comment block in that file.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/run-next.mjs dev",
     "build": "next build",
-    "start": "next start"
+    "start": "node scripts/run-next.mjs start"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

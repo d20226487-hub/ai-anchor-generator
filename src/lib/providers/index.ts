@@ -86,12 +86,16 @@ export async function pingProvider(providerId: ProviderId, settings: SettingsBlo
     // without spending quota. Mirrors Drop Sherlock's pattern.
     if (providerId === "vertex") {
       const { timeoutMs } = resolveProviderLimits(cfg);
+      const vertexModel = nonEmpty(settings.defaults.modelByProvider?.vertex) ?? PING_FALLBACK.vertex;
       return await pingVertex({
         serviceAccountJson: cfg?.serviceAccountJson,
         apiKey: cfg?.apiKey,
         projectId: cfg?.projectId,
         location: cfg?.location,
         timeoutMs,
+        // Express mode probes this model directly (the publisher-models listing 404s
+        // for Express keys); service-account mode ignores it.
+        model: vertexModel,
       });
     }
     if (!cfg?.apiKey) return { ok: false, message: "No API key set" };
