@@ -12,7 +12,7 @@
 import { loadSettings } from "./settings";
 import {
   addJobCostAndTokens,
-  appendJobAnchors,
+  appendJobAnchorsAndAdvance,
   claimOrRefreshRunnerLease,
   computeAiCost,
   getJob,
@@ -34,6 +34,9 @@ import { resolveProviderLimits } from "./providers/limits";
 // on those providers (including a TLS error that can never succeed) was misread as a rate
 // limit and retried forever. The job sat at `running` with 0 tokens and never surfaced the
 // real cause. Anchored to the actual phrases now.
+/** Re-asks for a batch whose JSON we couldn't parse before giving up. */
+const MAX_PARSE_RETRIES = 3;
+
 const RATE_LIMIT_HINTS = /\b429\b|rate[ _-]?limit|too many requests|quota|resource[ _-]?exhausted/i;
 
 // Transport failures that will NEVER fix themselves by waiting: bad TLS chain, DNS,
@@ -88,6 +91,7 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
   const runnerId = `server_${crypto.randomUUID()}`;
   let rateLimitBackoffMs = 0;
   let consecutiveRateLimits = 0;
+  let consecutiveParseFailures = 0;
 
   while (!ac.signal.aborted) {
     // Re-read job at the top of every batch — status / batches_done / criteria may have
@@ -127,6 +131,22 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
       return;
     }
 
+    // Unparseable output — re-run the SAME batch a few times before declaring defeat.
+    if (result.kind === "parse_failed") {
+      consecutiveParseFailures++;
+      if (consecutiveParseFailures >= MAX_PARSE_RETRIES) {
+        const anchorsCount = job.anchors?.length ?? 0;
+        const finalStatus = anchorsCount > 0 ? "partial" : "failed";
+        await setJobStatus(jobId, finalStatus, {
+          lastError: `AI returned unparseable output ${MAX_PARSE_RETRIES} times in a row for batch ${job.batchesDone + 1}/${job.batchesTotal} (giving up). Last message: ${result.message}`,
+        });
+        await releaseRunnerLease(jobId, runnerId);
+        return;
+      }
+      await sleep(2_000, ac.signal);
+      continue;
+    }
+
     if (result.kind === "rate_limited") {
       consecutiveRateLimits++;
       // Give up after the per-provider cap — flip to partial/failed so the user sees a
@@ -147,6 +167,7 @@ async function runLoop(jobId: string, ac: AbortController): Promise<void> {
 
     // Successful batch — pause to be polite to the provider, then continue.
     consecutiveRateLimits = 0;
+    consecutiveParseFailures = 0;
     rateLimitBackoffMs = 0;
     await sleep(limits.interBatchDelayMs, ac.signal);
   }
@@ -164,7 +185,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 export type BatchKind =
   | "running" | "succeeded" | "failed" | "partial" | "cancelled" | "paused"
-  | "lease_lost" | "rate_limited";
+  | "lease_lost" | "rate_limited"
+  // Unparseable AI output. NOT terminal: the model is non-deterministic, so the same batch
+  // usually parses on a retry. One malformed response used to kill a healthy multi-batch run.
+  | "parse_failed";
 
 export interface ProcessBatchResult {
   kind: BatchKind;
@@ -262,10 +286,12 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
     parsed = parseAnchorsResponse(raw);
   } catch (e) {
     const message = `Could not parse AI output: ${e instanceof Error ? e.message : String(e)}`;
-    const finalStatus = existing.length > 0 ? "partial" : "failed";
-    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
-    await releaseRunnerLease(jobId, runnerId);
-    return { kind: finalStatus, message, anchorsAdded: 0 };
+    // Retryable: keep the lease and DON'T advance batches_done, so runJobLoop re-runs
+    // this exact batch. Terminal only after MAX_PARSE_RETRIES consecutive failures.
+    await setJobStatus(jobId, "running", {
+      lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying…`,
+    });
+    return { kind: "parse_failed", message, anchorsAdded: 0 };
   }
 
   if (parsed.length === 0) {
@@ -316,8 +342,9 @@ export async function processBatch(jobId: string, batchIndex: number, runnerId: 
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
 
-  await appendJobAnchors(jobId, anchors);
-  await incrementBatchesDone(jobId);
+  // Atomic: anchors + batch progress commit together, so an interrupted run can never
+  // leave anchors saved with the batch still pending (Resume then duplicated the batch).
+  await appendJobAnchorsAndAdvance(jobId, anchors);
 
   const newBatchesDone = job.batchesDone + 1;
   const isLastBatch = newBatchesDone >= job.batchesTotal;
@@ -413,10 +440,12 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
     parsed = parseAnchorsResponseV2(raw);
   } catch (e) {
     const message = `Could not parse AI output: ${e instanceof Error ? e.message : String(e)}`;
-    const finalStatus = existing.length > 0 ? "partial" : "failed";
-    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
-    await releaseRunnerLease(jobId, runnerId);
-    return { kind: finalStatus, message, anchorsAdded: 0 };
+    // Retryable: keep the lease and DON'T advance batches_done, so runJobLoop re-runs
+    // this exact batch. Terminal only after MAX_PARSE_RETRIES consecutive failures.
+    await setJobStatus(jobId, "running", {
+      lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying…`,
+    });
+    return { kind: "parse_failed", message, anchorsAdded: 0 };
   }
 
   if (parsed.length === 0) {
@@ -472,8 +501,9 @@ export async function processBatchV2(jobId: string, batchIndex: number, runnerId
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
 
-  await appendJobAnchors(jobId, anchorsToInsert);
-  await incrementBatchesDone(jobId);
+  // Atomic: anchors + batch progress commit together, so an interrupted run can never
+  // leave anchors saved with the batch still pending (Resume then duplicated the batch).
+  await appendJobAnchorsAndAdvance(jobId, anchorsToInsert);
 
   const newBatchesDone = job.batchesDone + 1;
   const isLastBatch = newBatchesDone >= job.batchesTotal;
@@ -563,10 +593,12 @@ export async function processBatchPirogi(jobId: string, batchIndex: number, runn
     parsed = parseAnchorsResponsePirogi(raw);
   } catch (e) {
     const message = `Could not parse AI output: ${e instanceof Error ? e.message : String(e)}`;
-    const finalStatus = existing.length > 0 ? "partial" : "failed";
-    await setJobStatus(jobId, finalStatus, { lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}` });
-    await releaseRunnerLease(jobId, runnerId);
-    return { kind: finalStatus, message, anchorsAdded: 0 };
+    // Retryable: keep the lease and DON'T advance batches_done, so runJobLoop re-runs
+    // this exact batch. Terminal only after MAX_PARSE_RETRIES consecutive failures.
+    await setJobStatus(jobId, "running", {
+      lastError: `Batch ${batchIndex + 1}/${job.batchesTotal}: ${message}. Retrying…`,
+    });
+    return { kind: "parse_failed", message, anchorsAdded: 0 };
   }
 
   if (parsed.length === 0) {
@@ -605,8 +637,9 @@ export async function processBatchPirogi(jobId: string, batchIndex: number, runn
       };
     });
 
-  await appendJobAnchors(jobId, anchorsToInsert);
-  await incrementBatchesDone(jobId);
+  // Atomic: anchors + batch progress commit together, so an interrupted run can never
+  // leave anchors saved with the batch still pending (Resume then duplicated the batch).
+  await appendJobAnchorsAndAdvance(jobId, anchorsToInsert);
 
   const newBatchesDone = job.batchesDone + 1;
   const isLastBatch = newBatchesDone >= job.batchesTotal;

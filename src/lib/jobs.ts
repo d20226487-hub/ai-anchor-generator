@@ -305,15 +305,19 @@ export async function moveJobsToFolder(ids: string[], folderId: string | null): 
 
 export async function replaceJobAnchors(jobId: string, anchors: Array<Omit<JobAnchor, "id" | "jobId" | "manuallyEdited"> & { id?: string }>): Promise<void> {
   const c = await db();
-  await c.execute({ sql: "DELETE FROM job_anchors WHERE job_id = ?", args: [jobId] });
-  for (let i = 0; i < anchors.length; i++) {
-    const a = anchors[i];
-    await c.execute({
-      sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-      args: [a.id ?? uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, i, a.payloadV2 ? JSON.stringify(a.payloadV2) : null],
-    });
-  }
-  await c.execute({ sql: "UPDATE jobs SET updated_at = ? WHERE id = ?", args: [Date.now(), jobId] });
+  // Delete + reinsert + stamp in ONE transaction (same reasoning as appendJobAnchors).
+  // Without it a rebalance briefly exposed an EMPTY anchor list to anyone polling.
+  await c.batch(
+    [
+      { sql: "DELETE FROM job_anchors WHERE job_id = ?", args: [jobId] },
+      ...anchors.map((a, i) => ({
+        sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        args: [a.id ?? uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, i, a.payloadV2 ? JSON.stringify(a.payloadV2) : null],
+      })),
+      { sql: "UPDATE jobs SET updated_at = ? WHERE id = ?", args: [Date.now(), jobId] },
+    ],
+    "write"
+  );
 }
 
 export async function updateAnchorText(jobId: string, anchorId: string, text: string): Promise<void> {
@@ -390,14 +394,52 @@ export async function appendJobAnchors(
   // Find current max position so new anchors append after existing ones.
   const r = await c.execute({ sql: "SELECT COALESCE(MAX(position), -1) AS maxp FROM job_anchors WHERE job_id = ?", args: [jobId] });
   const startPos = (r.rows[0]?.maxp == null ? -1 : Number(r.rows[0].maxp)) + 1;
-  for (let i = 0; i < anchors.length; i++) {
-    const a = anchors[i];
-    await c.execute({
-      sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-      args: [uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, startPos + i, a.payloadV2 ? JSON.stringify(a.payloadV2) : null],
-    });
-  }
-  await c.execute({ sql: "UPDATE jobs SET updated_at = ? WHERE id = ?", args: [Date.now(), jobId] });
+  // ONE transaction for the whole batch. This used to be a sequential await-per-INSERT
+  // loop, so a 200-anchor batch meant 200 separately-committed writes. The job page polls
+  // every 2.5s and would catch the batch half-written — the anchor count crept up a few at
+  // a time and generation looked like it wasn't batching at all (very visible on the
+  // slower deployment disk). batch() commits atomically: readers see 0 then all 200.
+  await c.batch(
+    [
+      ...anchors.map((a, i) => ({
+        sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        args: [uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, startPos + i, a.payloadV2 ? JSON.stringify(a.payloadV2) : null],
+      })),
+      { sql: "UPDATE jobs SET updated_at = ? WHERE id = ?", args: [Date.now(), jobId] },
+    ],
+    "write"
+  );
+}
+
+/**
+ * Append a batch's anchors AND record the batch as done, in ONE transaction.
+ *
+ * These used to be two separate commits (appendJobAnchors + incrementBatchesDone). If the
+ * process died between them — deploy, restart, killed loop — the anchors were already
+ * durable but batches_done still pointed at that batch, so Resume regenerated it and
+ * appended a SECOND copy. Observed in the wild: a 5-row block delivered exactly double
+ * (38->76, 42->84, 40->80), one contiguous batch written twice with a gap in positions.
+ *
+ * Committing both together makes a batch all-or-nothing: either it counts and its anchors
+ * exist, or neither. A crash before commit just replays the batch cleanly.
+ */
+export async function appendJobAnchorsAndAdvance(
+  jobId: string,
+  anchors: Array<Omit<JobAnchor, "id" | "jobId" | "manuallyEdited">>
+): Promise<void> {
+  const c = await db();
+  const r = await c.execute({ sql: "SELECT COALESCE(MAX(position), -1) AS maxp FROM job_anchors WHERE job_id = ?", args: [jobId] });
+  const startPos = (r.rows[0]?.maxp == null ? -1 : Number(r.rows[0].maxp)) + 1;
+  await c.batch(
+    [
+      ...anchors.map((a, i) => ({
+        sql: "INSERT INTO job_anchors (id, job_id, input_id, target_url, brand_id, follow_status, anchor_text, category, manually_edited, position, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        args: [uid("anc"), jobId, a.inputId, a.targetUrl, a.brandId, a.followStatus, a.anchorText, a.category, startPos + i, a.payloadV2 ? JSON.stringify(a.payloadV2) : null],
+      })),
+      { sql: "UPDATE jobs SET batches_done = batches_done + 1, updated_at = ? WHERE id = ?", args: [Date.now(), jobId] },
+    ],
+    "write"
+  );
 }
 
 export async function clearJobAnchors(jobId: string): Promise<void> {
